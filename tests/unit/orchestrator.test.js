@@ -2,6 +2,7 @@
 
 const { Orchestrator } = require('../../src/core/orchestrator');
 const { ContextManager } = require('../../src/core/context-manager');
+const fileHandler = require('../../src/utils/file-handler');
 
 /**
  * Create a lightweight mock agent that returns a canned result.
@@ -98,6 +99,23 @@ describe('Orchestrator', () => {
       );
       expect(result.agent).toBe('coding');
       expect(mockAgents.coding.generate).toHaveBeenCalled();
+    });
+
+    it('passes explicit file context to coding generation', async () => {
+      jest.spyOn(fileHandler, 'readFile').mockReturnValue('const fromFile = true;');
+      await orchestrator.process(
+        'generate based on local file',
+        sessionId,
+        { agent: 'coding', language: 'javascript', filePaths: ['sample.js'] }
+      );
+      expect(mockAgents.coding.generate).toHaveBeenCalledWith(
+        'generate based on local file',
+        'javascript',
+        sessionId,
+        expect.objectContaining({
+          files: [expect.objectContaining({ path: 'sample.js', content: 'const fromFile = true;' })],
+        })
+      );
     });
 
     it('routes to fileAnalysis agent when filePath is provided', async () => {

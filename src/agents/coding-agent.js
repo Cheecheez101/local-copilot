@@ -27,12 +27,14 @@ class CodingAgent {
    * @param {string} description - What the code should do.
    * @param {string} language    - Target programming language.
    * @param {string} sessionId
+   * @param {{files?: Array<{path:string, content:string}>}} [context={}]
    * @returns {Promise<{ code: string, explanation: string, validation: object }>}
    */
-  async generate(description, language, sessionId) {
+  async generate(description, language, sessionId, context = {}) {
     this.contextManager.setSystemPrompt(sessionId, SYSTEM_PROMPT);
 
-    const prompt = `Generate ${language} code that: ${description}\n\nRequirements:\n- Clean, readable code\n- Proper error handling\n- Brief inline comments where helpful`;
+    const fileContext = this._buildFileContext(context.files);
+    const prompt = `Generate ${language} code that: ${description}\n\nRequirements:\n- Clean, readable code\n- Proper error handling\n- Brief inline comments where helpful${fileContext}`;
 
     this.contextManager.addMessage(sessionId, 'user', prompt);
     const messages = this.contextManager.getHistory(sessionId);
@@ -50,6 +52,20 @@ class CodingAgent {
       explanation: response,
       validation,
     };
+  }
+
+  _buildFileContext(files) {
+    if (!Array.isArray(files) || files.length === 0) {
+      return '';
+    }
+    const rendered = files
+      .slice(0, 5)
+      .map((f, idx) => {
+        const body = String(f.content || '').slice(0, 12000);
+        return `\nFile ${idx + 1}: ${f.path}\n\`\`\`\n${body}\n\`\`\``;
+      })
+      .join('\n');
+    return `\n\nUse the following local file context if relevant:${rendered}`;
   }
 
   /**

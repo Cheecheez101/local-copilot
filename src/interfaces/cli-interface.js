@@ -6,6 +6,7 @@ const path = require('path');
 const { Orchestrator } = require('../core/orchestrator');
 const { ModelManager } = require('../core/model-manager');
 const { ContextManager } = require('../core/context-manager');
+const { validateStartupEnv } = require('../utils/startup-validation');
 
 // Avoid chalk ESM issues – use ANSI codes directly
 const BOLD = '\x1b[1m';
@@ -28,7 +29,7 @@ ${CYAN}${BOLD}╔═════════════════════
 const HELP = `
 ${BOLD}Commands:${RESET}
   ${CYAN}/plan <task>${RESET}           Create a step-by-step plan
-  ${CYAN}/code <description>${RESET}    Generate code (use --lang=<lang>)
+  ${CYAN}/code <description>${RESET}    Generate code (use --lang=<lang> --file=<path> or --files=a,b)
   ${CYAN}/review${RESET}               Review code from clipboard or file (--file=<path>)
   ${CYAN}/refactor${RESET}             Refactor code (--file=<path> --goal=<goal>)
   ${CYAN}/debug${RESET}                Debug code (--file=<path> --error=<msg>)
@@ -119,7 +120,8 @@ class CLIInterface {
         this.print(JSON.stringify(response, null, 2));
       }
     } else {
-      this.print(response);
+      const text = typeof response === 'string' ? response.trim() : String(response || '');
+      this.print(text || `${YELLOW}[No response text returned by the model]${RESET}`);
     }
     this.print('');
   }
@@ -185,7 +187,12 @@ class CLIInterface {
           if (!rest) { this.error('Usage: /code <description> [--lang=javascript]'); break; }
           this.thinking();
           const language = flags.lang || flags.language || 'javascript';
-          const result = await this.orchestrator.process(rest, this.sessionId, { agent: 'coding', language });
+          const filePaths = [];
+          if (flags.file) filePaths.push(flags.file);
+          if (flags.files) filePaths.push(...String(flags.files).split(',').map((p) => p.trim()).filter(Boolean));
+          const options = { agent: 'coding', language };
+          if (filePaths.length > 0) options.filePaths = filePaths;
+          const result = await this.orchestrator.process(rest, this.sessionId, options);
           this.displayResult(result.agent, result.response);
           break;
         }
@@ -275,7 +282,14 @@ class CLIInterface {
           this.error(`Unknown command: /${command}. Type /help for a list of commands.`);
       }
     } catch (err) {
-      this.error(err.message);
+      const errMsg = err?.message || String(err || 'Unknown error');
+      if (/unable to reach|connect|unreachable/i.test(errMsg)) {
+        this.error(`${errMsg}\n💡 Make sure Foundry Local is running: foundry service start`);
+      } else if (/timed out/i.test(errMsg)) {
+        this.error(`${errMsg}\n💡 Model is slow. Increase timeout in config/default.json`);
+      } else {
+        this.error(errMsg);
+      }
     }
   }
 
@@ -287,9 +301,20 @@ class CLIInterface {
     this.thinking();
     try {
       const result = await this.orchestrator.process(message, this.sessionId);
+      if (!result || !result.response) {
+        this.error('No response received from agent. Is Foundry Local running?');
+        return;
+      }
       this.displayResult(result.agent, result.response);
     } catch (err) {
-      this.error(err.message);
+      const errMsg = err?.message || String(err || 'Unknown error');
+      if (/unable to reach|connect|unreachable/i.test(errMsg)) {
+        this.error(`${errMsg}\n\n💡 Make sure Foundry Local is running: foundry service start`);
+      } else if (/timed out/i.test(errMsg)) {
+        this.error(`${errMsg}\n\n💡 Model is slow. Increase timeout in config/default.json`);
+      } else {
+        this.error(errMsg);
+      }
     }
   }
 
@@ -298,6 +323,13 @@ class CLIInterface {
    */
   async start() {
     this.print(BANNER);
+    const env = validateStartupEnv();
+    if (env.errors.length || env.warnings.length) {
+      this.print(`${YELLOW}Startup validation:${RESET}`);
+      for (const err of env.errors) this.print(`${RED}  - ${err}${RESET}`);
+      for (const warn of env.warnings) this.print(`${YELLOW}  - ${warn}${RESET}`);
+      this.print('');
+    }
 
     // Check model service availability
     const available = await this.orchestrator.isModelServiceAvailable();

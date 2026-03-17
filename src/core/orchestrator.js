@@ -6,6 +6,7 @@ const codingAgent = require('../agents/coding-agent');
 const fileAnalysisAgent = require('../agents/file-analysis-agent');
 const modelManager = require('./model-manager');
 const contextManager = require('./context-manager');
+const fileHandler = require('../utils/file-handler');
 
 /**
  * Intent classification keywords used to route tasks to the right agent.
@@ -144,10 +145,32 @@ class Orchestrator {
         response = await this.codingAgent.review(options.code, language, sessionId);
       }
     } else {
-      response = await this.codingAgent.generate(task, language, sessionId);
+      const fileContext = this._collectFileContext(options);
+      response = await this.codingAgent.generate(task, language, sessionId, { files: fileContext });
     }
 
     return { agent: 'coding', response };
+  }
+
+  _collectFileContext(options) {
+    const explicitPaths = [];
+    if (typeof options.filePath === 'string') explicitPaths.push(options.filePath);
+    if (Array.isArray(options.filePaths)) explicitPaths.push(...options.filePaths);
+    if (typeof options.files === 'string') {
+      explicitPaths.push(...options.files.split(',').map((p) => p.trim()).filter(Boolean));
+    }
+
+    const uniquePaths = Array.from(new Set(explicitPaths.map((p) => String(p).trim()).filter(Boolean)));
+    const files = [];
+    for (const p of uniquePaths.slice(0, 5)) {
+      try {
+        const content = fileHandler.readFile(p);
+        files.push({ path: p, content });
+      } catch {
+        // Ignore unreadable files; explicit failures are surfaced by file commands.
+      }
+    }
+    return files;
   }
 
   /**

@@ -1,3 +1,4 @@
+
 {
   "foundryLocal": {
     "baseUrl": "http://localhost:5272",
@@ -7,26 +8,47 @@
     ],
     "apiPath": "/v1/chat/completions",
     "modelsPath": "/v1/models",
-    "timeout": 60000
+    "timeout": 300000
   },
   "models": {
+    "chat": {
+      "id": "qwen2.5-coder-1.5b-instruct-generic-cpu:4",
+      "alias": "chat",
+      "maxTokens": 2048,
+      "temperature": 0.2
+    },
     "reasoning": {
-      "id": "Phi-3.5-mini-instruct-generic-gpu:1",
+      "id": "Phi-4-mini-reasoning-generic-cpu:3",
       "alias": "reasoning",
       "maxTokens": 2048,
       "temperature": 0.3
     },
     "coding": {
-      "id": "Phi-3.5-mini-instruct-generic-gpu:1",
+      "id": "qwen2.5-coder-1.5b-instruct-generic-cpu:4",
       "alias": "coding",
       "maxTokens": 4096,
       "temperature": 0.1
     },
     "fileAnalysis": {
-      "id": "Phi-3.5-mini-instruct-generic-gpu:1",
+      "id": "qwen2.5-coder-1.5b-instruct-generic-cpu:4",
       "alias": "fileAnalysis",
       "maxTokens": 4096,
       "temperature": 0.2
+    }
+  },
+  "activeModelProfile": "cpu-balanced",
+  "modelProfiles": {
+    "cpu-balanced": {
+      "chat": "qwen2.5-coder-1.5b-instruct-generic-cpu:4",
+      "reasoning": "Phi-4-mini-reasoning-generic-cpu:3",
+      "coding": "qwen2.5-coder-1.5b-instruct-generic-cpu:4",
+      "fileAnalysis": "qwen2.5-coder-1.5b-instruct-generic-cpu:4"
+    },
+    "cpu-fast": {
+      "chat": "qwen2.5-coder-1.5b-instruct-generic-cpu:4",
+      "reasoning": "qwen2.5-coder-1.5b-instruct-generic-cpu:4",
+      "coding": "qwen2.5-coder-1.5b-instruct-generic-cpu:4",
+      "fileAnalysis": "qwen2.5-coder-1.5b-instruct-generic-cpu:4"
     }
   },
   "context": {

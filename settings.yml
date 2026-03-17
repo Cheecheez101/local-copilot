@@ -1,0 +1,4 @@
+foundry:
+  version_control:
+    repository_url: "https://github.com/Cheecheez101/local-copilot.git"
+    branch: "copilot/add-local-ai-dev-copilot"

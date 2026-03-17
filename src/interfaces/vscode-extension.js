@@ -18,6 +18,13 @@
 const { Orchestrator } = require('../core/orchestrator');
 const { ModelManager } = require('../core/model-manager');
 const { ContextManager } = require('../core/context-manager');
+const { AIToolkitIntegration } = require('../vscode/ai-toolkit-integration');
+const { exec } = require('child_process');
+const util = require('util');
+const { validateStartupEnv } = require('../utils/startup-validation');
+const { redactSecrets } = require('../utils/logger');
+
+const execAsync = util.promisify(exec);
 
 let vscode;
 try {
@@ -30,6 +37,9 @@ try {
 let orchestrator = null;
 let sessionId = null;
 let outputChannel = null;
+let toolkitIntegration = null;
+let testOnSaveEnabled = false;
+let testOnSaveDisposable = null;
 
 /**
  * Initialise the shared orchestrator + session used across all commands.
@@ -54,6 +64,10 @@ function showOutput(text) {
   } else {
     console.log(text);
   }
+}
+
+function safeOutput(data) {
+  showOutput(typeof data === 'string' ? data : JSON.stringify(redactSecrets(data), null, 2));
 }
 
 /**
@@ -126,6 +140,13 @@ async function insertAtCursor(text) {
   await editor.edit((editBuilder) => {
     editBuilder.insert(editor.selection.active, text);
   });
+}
+
+function getWorkspaceRoot() {
+  if (!vscode?.workspace?.workspaceFolders?.length) {
+    return process.cwd();
+  }
+  return vscode.workspace.workspaceFolders[0].uri.fsPath;
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +285,122 @@ async function cmdClearHistory() {
   showOutput('--- History cleared ---');
 }
 
+async function cmdRunTests() {
+  if (!vscode) return;
+  const cwd = getWorkspaceRoot();
+  showOutput('--- Run Tests ---');
+  await withProgress('Running tests…', async () => {
+    try {
+      const command = process.platform === 'win32' ? 'npm.cmd test' : 'npm test';
+      const { stdout, stderr } = await execAsync(command, { cwd, maxBuffer: 1024 * 1024 * 20 });
+      if (stdout) showOutput(stdout.trim());
+      if (stderr) showOutput(stderr.trim());
+      vscode.window.showInformationMessage('Local AI Co-Pilot: Tests completed.');
+    } catch (error) {
+      const details = error?.stderr || error?.stdout || error?.message || String(error);
+      showOutput(details);
+      vscode.window.showErrorMessage('Local AI Co-Pilot: Test run failed. See output channel.');
+    }
+  });
+}
+
+async function cmdGitStatus() {
+  if (!vscode) return;
+  const cwd = getWorkspaceRoot();
+  showOutput('--- Git Status ---');
+  await withProgress('Checking git status…', async () => {
+    try {
+      const { stdout } = await execAsync('git --no-pager status --short --branch && git --no-pager log -1 --oneline', {
+        cwd,
+        maxBuffer: 1024 * 1024 * 5,
+      });
+      showOutput(stdout.trim() || 'Repository is clean.');
+    } catch (error) {
+      const details = error?.stderr || error?.stdout || error?.message || String(error);
+      showOutput(details);
+      vscode.window.showErrorMessage('Local AI Co-Pilot: Git status failed. See output channel.');
+    }
+  });
+}
+
+async function cmdGitDiff() {
+  if (!vscode) return;
+  const cwd = getWorkspaceRoot();
+  showOutput('--- Git Diff ---');
+  await withProgress('Collecting git diff…', async () => {
+    try {
+      const { stdout } = await execAsync('git --no-pager diff -- . && git --no-pager diff --cached -- .', {
+        cwd,
+        maxBuffer: 1024 * 1024 * 20,
+      });
+      showOutput(stdout.trim() || 'No changes to diff.');
+    } catch (error) {
+      safeOutput({ error: error?.message, stderr: error?.stderr, stdout: error?.stdout });
+      vscode.window.showErrorMessage('Local AI Co-Pilot: Git diff failed. See output channel.');
+    }
+  });
+}
+
+async function cmdDraftCommitMessage() {
+  initOrchestrator();
+  if (!vscode) return;
+  const cwd = getWorkspaceRoot();
+  showOutput('--- Draft Commit Message ---');
+  await withProgress('Drafting commit message…', async () => {
+    try {
+      const { stdout } = await execAsync('git --no-pager diff --cached -- .', { cwd, maxBuffer: 1024 * 1024 * 20 });
+      if (!stdout.trim()) {
+        vscode.window.showWarningMessage('Stage changes first (git add ...) to draft a commit message.');
+        return;
+      }
+      const result = await orchestrator.process(
+        `Draft a concise conventional commit message from this staged diff:\n\n${stdout.slice(0, 20000)}`,
+        sessionId,
+        { agent: 'reasoning' }
+      );
+      const msg = typeof result.response === 'string' ? result.response : JSON.stringify(result.response, null, 2);
+      showOutput(msg);
+      await vscode.env.clipboard.writeText(msg);
+      vscode.window.showInformationMessage('Commit message draft copied to clipboard.');
+    } catch (error) {
+      safeOutput({ error: error?.message, stderr: error?.stderr, stdout: error?.stdout });
+      vscode.window.showErrorMessage('Local AI Co-Pilot: Commit draft failed. See output channel.');
+    }
+  });
+}
+
+function configureTestOnSave(context) {
+  if (testOnSaveDisposable) {
+    testOnSaveDisposable.dispose();
+    testOnSaveDisposable = null;
+  }
+  if (!testOnSaveEnabled) return;
+  testOnSaveDisposable = vscode.workspace.onDidSaveTextDocument(async () => {
+    await cmdRunTests();
+  });
+  context.subscriptions.push(testOnSaveDisposable);
+}
+
+async function cmdToggleTestOnSave(context) {
+  if (!vscode) return;
+  testOnSaveEnabled = !testOnSaveEnabled;
+  configureTestOnSave(context);
+  vscode.window.showInformationMessage(`Local AI Co-Pilot: test-on-save ${testOnSaveEnabled ? 'enabled' : 'disabled'}.`);
+}
+
+async function cmdDiagnostics() {
+  initOrchestrator();
+  if (!vscode) return;
+  const env = validateStartupEnv();
+  const [available, models] = await Promise.all([
+    orchestrator.isModelServiceAvailable().catch(() => false),
+    orchestrator.listModels().catch(() => []),
+  ]);
+  const payload = { available, models, env, timestamp: new Date().toISOString() };
+  const panel = vscode.window.createWebviewPanel('localCopilotDiagnostics', 'Local AI Diagnostics', vscode.ViewColumn.One, {});
+  panel.webview.html = `<html><body><h2>Local AI Diagnostics</h2><pre>${JSON.stringify(redactSecrets(payload), null, 2)}</pre></body></html>`;
+}
+
 // ---------------------------------------------------------------------------
 // VS Code extension lifecycle
 // ---------------------------------------------------------------------------
@@ -277,12 +414,21 @@ function activate(context) {
 
   outputChannel = vscode.window.createOutputChannel('Local AI Co-Pilot');
   outputChannel.appendLine('Local AI Dev Co-Pilot activated.');
+  const env = validateStartupEnv();
+  if (env.errors.length || env.warnings.length) {
+    safeOutput({ startupValidation: env });
+  }
 
   const commands = [
     ['localCopilot.explain', cmdExplain],
     ['localCopilot.review', cmdReview],
     ['localCopilot.refactor', cmdRefactor],
     ['localCopilot.generate', cmdGenerateCode],
+    ['localCopilot.runTests', cmdRunTests],
+    ['localCopilot.gitStatus', cmdGitStatus],
+    ['localCopilot.gitDiff', cmdGitDiff],
+    ['localCopilot.draftCommitMessage', cmdDraftCommitMessage],
+    ['localCopilot.diagnostics', cmdDiagnostics],
     ['localCopilot.ask', cmdAsk],
     ['localCopilot.clearHistory', cmdClearHistory],
   ];
@@ -290,6 +436,22 @@ function activate(context) {
   for (const [id, handler] of commands) {
     const disposable = vscode.commands.registerCommand(id, handler);
     context.subscriptions.push(disposable);
+  }
+  context.subscriptions.push(vscode.commands.registerCommand('localCopilot.toggleTestOnSave', () => cmdToggleTestOnSave(context)));
+
+  try {
+    initOrchestrator();
+    toolkitIntegration = new AIToolkitIntegration(context, orchestrator);
+    orchestrator.isModelServiceAvailable().then((available) => {
+      if (!available) {
+        vscode.window.showWarningMessage('Local AI Co-Pilot: model service appears offline. Run diagnostics.');
+      }
+    }).catch(() => {
+      vscode.window.showWarningMessage('Local AI Co-Pilot: startup self-check failed. Run diagnostics.');
+    });
+  } catch (error) {
+    showOutput(`AI Toolkit integration failed to initialize: ${error.message}`);
+    vscode.window.showWarningMessage('Local AI Co-Pilot: AI Toolkit integration was not initialized.');
   }
 
   // Status bar item
@@ -307,6 +469,12 @@ function activate(context) {
 function deactivate() {
   orchestrator = null;
   sessionId = null;
+  toolkitIntegration = null;
+  testOnSaveEnabled = false;
+  if (testOnSaveDisposable) {
+    testOnSaveDisposable.dispose();
+    testOnSaveDisposable = null;
+  }
   if (outputChannel) {
     outputChannel.dispose();
     outputChannel = null;

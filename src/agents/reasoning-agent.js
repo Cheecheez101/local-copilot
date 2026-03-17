@@ -73,7 +73,9 @@ class ReasoningAgent {
     this.contextManager.addMessage(sessionId, 'user', question);
 
     const messages = this.contextManager.getHistory(sessionId);
-    const response = await this.modelManager.chat(this.role, messages);
+    // General chat should prioritize UX when a dedicated chat model is configured.
+    const chatRole = this.modelManager?.config?.models?.chat ? 'chat' : this.role;
+    const response = await this.modelManager.chat(chatRole, messages);
 
     this.contextManager.addMessage(sessionId, 'assistant', response);
     return response;

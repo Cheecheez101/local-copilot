@@ -2,6 +2,8 @@
 
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
+const { log } = require('../utils/logger');
 
 let fetchFn;
 try {
@@ -21,8 +23,27 @@ const DEFAULT_CONFIG_PATH = path.join(__dirname, '../../config/default.json');
 class ModelManager {
   constructor(config) {
     this.config = config || this._loadDefaultConfig();
+    this._applyModelProfile();
     this._availableModels = null;
     this._resolvedBaseUrl = null;
+  }
+
+  /**
+   * Apply a named model profile if configured.
+   * Profile source order: env MODEL_PROFILE -> config.activeModelProfile.
+   */
+  _applyModelProfile() {
+    const profileName = process.env.MODEL_PROFILE || this.config?.activeModelProfile;
+    const profiles = this.config?.modelProfiles;
+    if (!profileName || !profiles || !profiles[profileName]) {
+      return;
+    }
+    const profile = profiles[profileName];
+    for (const [role, value] of Object.entries(profile)) {
+      if (this.config.models?.[role]?.id && typeof value === 'string') {
+        this.config.models[role].id = value;
+      }
+    }
   }
 
   /**
@@ -40,12 +61,13 @@ class ModelManager {
           fallbackBaseUrls: ['http://127.0.0.1:5272', 'http://127.0.0.1:59501'],
           apiPath: '/v1/chat/completions',
           modelsPath: '/v1/models',
-          timeout: 60000,
+          timeout: 300000,
         },
         models: {
-          reasoning: { id: 'Phi-3.5-mini-instruct-generic-gpu:1', maxTokens: 2048, temperature: 0.3 },
-          coding: { id: 'Phi-3.5-mini-instruct-generic-gpu:1', maxTokens: 4096, temperature: 0.1 },
-          fileAnalysis: { id: 'Phi-3.5-mini-instruct-generic-gpu:1', maxTokens: 4096, temperature: 0.2 },
+          chat: { id: 'Phi-4-generic-cpu:1', maxTokens: 2048, temperature: 0.2 },
+          reasoning: { id: 'Phi-4-mini-reasoning-generic-cpu:3', maxTokens: 2048, temperature: 0.3 },
+          coding: { id: 'qwen2.5-coder-1.5b-instruct-generic-cpu:4', maxTokens: 4096, temperature: 0.1 },
+          fileAnalysis: { id: 'qwen2.5-coder-1.5b-instruct-generic-cpu:4', maxTokens: 4096, temperature: 0.2 },
         },
       };
     }
@@ -79,15 +101,29 @@ class ModelManager {
    */
   _candidateBaseUrls() {
     const cfg = this.config?.foundryLocal || {};
+    let discoveredFoundryBaseUrl = '';
+    try {
+      const statusOut = execSync('foundry service status', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      const m = statusOut.match(/https?:\/\/[^\s/]+(?::\d+)?\/?/i);
+      discoveredFoundryBaseUrl = m ? m[0].replace(/\/+$/, '') : '';
+    } catch {
+      // Ignore if Foundry CLI is not available or service is not running.
+    }
+
     const candidates = [
+      process.env.OPENAI_BASE_URL,
       process.env.FOUNDRY_BASE_URL,
       process.env.FOUNDRY_LOCAL_BASE_URL,
+      discoveredFoundryBaseUrl,
+      discoveredFoundryBaseUrl ? `${discoveredFoundryBaseUrl}/openai` : '',
       cfg.baseUrl,
       ...(Array.isArray(cfg.fallbackBaseUrls) ? cfg.fallbackBaseUrls : []),
       'http://127.0.0.1:5272',
       'http://localhost:5272',
       'http://127.0.0.1:59501',
       'http://localhost:59501',
+      'http://127.0.0.1:61731',
+      'http://localhost:61731',
     ];
 
     const seen = new Set();
@@ -102,6 +138,25 @@ class ModelManager {
   }
 
   /**
+   * Build request headers for OpenAI-compatible APIs.
+   * Supports local Foundry defaults and optional remote-provider auth.
+   * @returns {{[k:string]: string}}
+   */
+  _buildHeaders() {
+    const headers = { 'Content-Type': 'application/json' };
+    const bearer =
+      process.env.OPENAI_API_KEY ||
+      process.env.GITHUB_TOKEN ||
+      process.env.AZURE_INFERENCE_API_KEY ||
+      process.env.FOUNDRY_API_KEY;
+
+    if (bearer) {
+      headers.Authorization = `Bearer ${bearer}`;
+    }
+    return headers;
+  }
+
+  /**
    * Probe a base URL by calling the models endpoint.
    * @param {string} baseUrl
    * @returns {Promise<boolean>}
@@ -111,7 +166,7 @@ class ModelManager {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5000);
     try {
-      const res = await fetchFn(url, { signal: controller.signal });
+      const res = await fetchFn(url, { signal: controller.signal, headers: this._buildHeaders() });
       return res.ok;
     } finally {
       clearTimeout(timer);
@@ -165,13 +220,22 @@ class ModelManager {
   async listAvailableModels() {
     const baseUrl = await this._resolveBaseUrl();
     const url = this._buildUrl(baseUrl, this.config.foundryLocal.modelsPath);
-    const res = await fetchFn(url);
-    if (!res.ok) {
-      throw new Error(`Failed to fetch models: ${res.status} ${res.statusText}`);
+    
+    const controller = new AbortController();
+    const timeout = this.config.foundryLocal.timeout || 60000;
+    const timer = setTimeout(() => controller.abort(), timeout);
+    
+    try {
+      const res = await fetchFn(url, { signal: controller.signal, headers: this._buildHeaders() });
+      if (!res.ok) {
+        throw new Error(`Failed to fetch models from ${url}: ${res.status} ${res.statusText}`);
+      }
+      const data = await res.json();
+      this._availableModels = (data.data || []).map((m) => m.id);
+      return this._availableModels;
+    } finally {
+      clearTimeout(timer);
     }
-    const data = await res.json();
-    this._availableModels = (data.data || []).map((m) => m.id);
-    return this._availableModels;
   }
 
   /**
@@ -185,6 +249,118 @@ class ModelManager {
       throw new Error(`Unknown model role: ${role}`);
     }
     return modelCfg;
+  }
+
+  /**
+   * Pick a sensible fallback model for a role from advertised model IDs.
+   * @param {string} role
+   * @param {string[]} available
+   * @returns {string}
+   */
+  _pickFallbackModel(role, available) {
+    const normalized = available.map((m) => String(m).toLowerCase());
+    const findBy = (patterns) => {
+      const idx = normalized.findIndex((m) => patterns.some((p) => m.includes(p)));
+      return idx >= 0 ? available[idx] : null;
+    };
+
+    if (role === 'chat') {
+      return findBy(['phi-4']) || findBy(['chat']) || available[0];
+    }
+    if (role === 'reasoning') {
+      return findBy(['reasoning', 'phi-4-mini-reasoning']) || findBy(['phi-4']) || available[0];
+    }
+    if (role === 'coding' || role === 'fileAnalysis') {
+      return findBy(['qwen', 'coder']) || available[0];
+    }
+    return available[0];
+  }
+
+  /**
+   * Attempt one model fallback for the given role and re-run chat once.
+   * @param {string} role
+   * @param {string} currentModelId
+   * @param {Array<{ role: string, content: string }>} messages
+   * @param {object} overrides
+   * @returns {Promise<string>}
+   */
+  async _retryWithFallbackModel(role, currentModelId, messages, overrides = {}) {
+    const available = await this.listAvailableModels();
+    if (!available.length) {
+      throw new Error('No models available for fallback.');
+    }
+
+    const lowerCurrent = String(currentModelId || '').toLowerCase();
+    const preferred = this._pickFallbackModel(role, available);
+    const fallback = String(preferred || '').toLowerCase() === lowerCurrent
+      ? available.find((m) => String(m || '').toLowerCase() !== lowerCurrent)
+      : preferred;
+
+    if (!fallback) {
+      throw new Error(`No alternate fallback model found for role ${role}.`);
+    }
+
+    this.setModel(role, fallback);
+    log('info', 'model_fallback_applied', { role, from: currentModelId, to: fallback });
+    return this.chat(role, messages, { ...overrides, __fallbackAttempted: true });
+  }
+
+  /**
+   * Normalize OpenAI-compatible message content into plain text.
+   * Supports string content and structured content arrays/objects.
+   *
+   * @param {*} content
+   * @returns {string}
+   */
+  _extractTextContent(content) {
+    if (typeof content === 'string') {
+      return content.trim();
+    }
+
+    if (Array.isArray(content)) {
+      return content
+        .map((part) => {
+          if (typeof part === 'string') return part;
+          if (part && typeof part === 'object') {
+            if (typeof part.text === 'string') return part.text;
+            if (typeof part.content === 'string') return part.content;
+          }
+          return '';
+        })
+        .join('')
+        .trim();
+    }
+
+    if (content && typeof content === 'object') {
+      if (typeof content.text === 'string') return content.text.trim();
+      if (typeof content.content === 'string') return content.content.trim();
+    }
+
+    return '';
+  }
+
+  /**
+   * Extract assistant text from an OpenAI-compatible choice object.
+   * Supports both chat (`message.content`) and legacy completion (`text`) formats.
+   *
+   * @param {*} choice
+   * @returns {string}
+   */
+  _extractChoiceText(choice) {
+    if (!choice || typeof choice !== 'object') {
+      return '';
+    }
+
+    const messageText = this._extractTextContent(choice?.message?.content);
+    if (messageText) {
+      return messageText;
+    }
+
+    if (typeof choice.text === 'string') {
+      return choice.text.trim();
+    }
+
+    return '';
   }
 
   /**
@@ -209,17 +385,26 @@ class ModelManager {
     };
 
     const timeout = this.config.foundryLocal.timeout || 60000;
+    const headers = this._buildHeaders();
 
-    const performRequest = async (requestUrl) => {
+    const performRequest = async (requestUrl, body, modelIdForError) => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeout);
       try {
         return await fetchFn(requestUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
+          headers,
+          body: JSON.stringify(body),
           signal: controller.signal,
         });
+      } catch (err) {
+        const isAbort = err?.name === 'AbortError' || /aborted|abort/i.test(String(err?.message || ''));
+        if (isAbort) {
+          throw new Error(
+            `Request timed out after ${timeout}ms at ${requestUrl} (model: ${modelIdForError}). Increase foundryLocal.timeout in config/default.json for CPU models.`
+          );
+        }
+        throw err;
       } finally {
         clearTimeout(timer);
       }
@@ -227,33 +412,99 @@ class ModelManager {
 
     let res;
     try {
-      res = await performRequest(url);
-    } catch {
+      res = await performRequest(url, payload, modelCfg.id);
+    } catch (err) {
+      // Check if this is a timeout error
+      if (/timed out after/i.test(String(err?.message || ''))) {
+        if (!overrides.__fallbackAttempted) {
+          try {
+            return await this._retryWithFallbackModel(role, modelCfg.id, messages, overrides);
+          } catch {
+            // Keep original timeout error when fallback fails.
+          }
+        }
+        throw err;
+      }
+      
       // Retry once after re-discovering the active endpoint (service port may have changed).
-      baseUrl = await this._resolveBaseUrl(true);
-      url = this._buildUrl(baseUrl, this.config.foundryLocal.apiPath);
-      res = await performRequest(url);
+      try {
+        baseUrl = await this._resolveBaseUrl(true);
+        url = this._buildUrl(baseUrl, this.config.foundryLocal.apiPath);
+        res = await performRequest(url, payload, modelCfg.id);
+      } catch (retryErr) {
+        throw retryErr;
+      }
     }
 
     if (!res.ok) {
       const errText = await res.text();
 
-      // Recover from stale model IDs by switching to the first advertised model.
-      if (res.status === 400 && /model.*not found|was not found/i.test(errText)) {
-        const available = await this.listAvailableModels();
-        if (available.length > 0 && available[0] !== modelCfg.id) {
-          this.setModel(role, available[0]);
-          return this.chat(role, messages, overrides);
+      if (res.status === 400) {
+        // Recover from stale model IDs even when server error text is blank/opaque.
+        try {
+          const available = await this.listAvailableModels();
+          const currentModel = String(modelCfg.id || '').toLowerCase();
+          const currentExists = available.some((m) => String(m).toLowerCase() === currentModel);
+
+          if (!currentExists && available.length > 0) {
+            const fallback = this._pickFallbackModel(role, available);
+            this.setModel(role, fallback);
+            return this.chat(role, messages, { ...overrides, __fallbackAttempted: true });
+          }
+        } catch {
+          // Keep original error path if models list cannot be fetched.
+        }
+
+        // Some local OpenAI-compatible servers reject optional generation fields.
+        // Retry once with a minimal payload before failing.
+        const minimalPayload = {
+          model: this.getModelConfig(role).id,
+          messages,
+          stream: false,
+        };
+        
+        const minimalController = new AbortController();
+        const minimalTimer = setTimeout(() => minimalController.abort(), timeout);
+        try {
+          const retryRes = await fetchFn(url, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(minimalPayload),
+            signal: minimalController.signal,
+          });
+          if (retryRes.ok) {
+            const retryData = await retryRes.json();
+            const retryContent = this._extractChoiceText(retryData?.choices?.[0]);
+            if (retryContent) {
+              return retryContent;
+            }
+            throw new Error('Foundry Local returned an empty response body.');
+          }
+
+          const retryErrText = await retryRes.text();
+          throw new Error(
+            `Foundry Local API error 400: ${errText || '<empty error body>'}; retry(minimal payload) => ${retryRes.status} ${retryErrText || '<empty error body>'}`
+          );
+        } finally {
+          clearTimeout(minimalTimer);
         }
       }
 
-      throw new Error(`Foundry Local API error ${res.status}: ${errText}`);
+      if (!overrides.__fallbackAttempted && [429, 500, 502, 503, 504].includes(res.status)) {
+        try {
+          return await this._retryWithFallbackModel(role, modelCfg.id, messages, overrides);
+        } catch {
+          // Preserve the original API error if fallback is unavailable.
+        }
+      }
+
+      throw new Error(`OpenAI-compatible API error ${res.status} at ${url} (model: ${modelCfg.id}): ${errText}`);
     }
 
     const data = await res.json();
-    const content = data?.choices?.[0]?.message?.content;
-    if (content === undefined || content === null) {
-      throw new Error('Unexpected response format from Foundry Local');
+    const content = this._extractChoiceText(data?.choices?.[0]);
+    if (!content) {
+      throw new Error('Foundry Local returned an empty response body.');
     }
     return content;
   }

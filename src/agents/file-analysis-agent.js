@@ -140,6 +140,54 @@ class FileAnalysisAgent {
     this.contextManager.addMessage(sessionId, 'assistant', response);
     return response;
   }
+
+  /**
+   * Analyse an uploaded image via OpenAI-compatible multimodal message format.
+   * @param {string} imageDataUrl - Data URL, e.g. data:image/png;base64,...
+   * @param {string} mimeType
+   * @param {string} question
+   * @param {string} sessionId
+   * @param {string} fileName
+   * @returns {Promise<string>}
+   */
+  async analyzeImage(imageDataUrl, mimeType, question, sessionId, fileName = 'uploaded-image') {
+    this.contextManager.setSystemPrompt(sessionId, SYSTEM_PROMPT);
+
+    const textPrompt = question
+      ? `Analyze this uploaded image (${fileName}, ${mimeType}) and answer: ${question}`
+      : `Analyze this uploaded image (${fileName}, ${mimeType}). Describe what it contains and any important technical details.`;
+
+    const messages = [
+      { role: 'system', content: SYSTEM_PROMPT },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: textPrompt },
+          { type: 'image_url', image_url: { url: imageDataUrl } },
+        ],
+      },
+    ];
+
+    try {
+      const response = await this.modelManager.chat(this.role, messages, { maxTokens: 512, temperature: 0.1 });
+      this.contextManager.addMessage(sessionId, 'user', `[image] ${fileName} (${mimeType}) ${question || ''}`.trim());
+      this.contextManager.addMessage(sessionId, 'assistant', response);
+      return response;
+    } catch (err) {
+      const msg = String(err?.message || err);
+      if (/failed to allocate memory|bfcarena|out of memory|non-zero status code|bad allocation/i.test(msg)) {
+        throw new Error(
+          'Image analysis ran out of memory. Upload a smaller screenshot (the web app now auto-compresses), or switch fileAnalysis to a lighter vision model.'
+        );
+      }
+      if (/image|vision|multimodal|unsupported/i.test(msg)) {
+        throw new Error(
+          'Current file-analysis model does not support image input. Use a vision-capable model in config/default.json for fileAnalysis.'
+        );
+      }
+      throw err;
+    }
+  }
 }
 
 module.exports = new FileAnalysisAgent();

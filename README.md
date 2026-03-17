@@ -56,7 +56,7 @@ local-ai-dev-copilot/
 2. **Foundry Local** installed and running (default is often `http://localhost:5272`, but local port may vary)
    * Download: <https://github.com/microsoft/Foundry>
    * Start: `foundry service start`
-   * Pull a model (example): `foundry model run Phi-3.5-mini-instruct-generic-gpu:1`
+   * Pull a model (example): `foundry model run qwen2.5-coder-1.5b-instruct-generic-cpu:4`
 
 ---
 
@@ -105,6 +105,12 @@ npm run web
 # Open http://127.0.0.1:3000
 ```
 
+If port `3000` is already in use, override it:
+
+```powershell
+$env:PORT=3001; npm run web
+```
+
 The web UI exposes:
 * `GET  /api/health`    – service health check
 * `POST /api/session`   – create a new session
@@ -122,6 +128,12 @@ extension lifecycle (`activate` / `deactivate`). Commands registered:
 | `localCopilot.review` | Review current file |
 | `localCopilot.refactor` | Refactor selected code |
 | `localCopilot.generate` | Generate code from description |
+| `localCopilot.runTests` | Run project test suite (`npm test`) |
+| `localCopilot.gitStatus` | Show git branch, status, and latest commit |
+| `localCopilot.gitDiff` | Show working tree + staged diff |
+| `localCopilot.draftCommitMessage` | Draft commit message from staged diff |
+| `localCopilot.toggleTestOnSave` | Toggle auto-running tests on file save |
+| `localCopilot.diagnostics` | Open diagnostics panel |
 | `localCopilot.ask` | Ask a free-form question |
 | `localCopilot.clearHistory` | Clear conversation history |
 
@@ -130,6 +142,12 @@ extension lifecycle (`activate` / `deactivate`). Commands registered:
 ## Configuration
 
 Edit `config/default.json` to customise model IDs, preferred Foundry Local URL, token limits, and the web server port.
+
+The runtime now includes automatic robustness features:
+* retries endpoint discovery when a request fails
+* falls back to an alternate available model on timeout/transient `5xx` errors
+* auto-recovers from stale model IDs when providers return `400`
+* supports CPU model profiles (`activeModelProfile` / `MODEL_PROFILE`)
 
 The app now probes multiple local Foundry endpoints automatically. If your Foundry endpoint is custom, set one of:
 
@@ -140,7 +158,8 @@ The app now probes multiple local Foundry endpoints automatically. If your Found
 {
   "foundryLocal": {
     "baseUrl": "http://localhost:5272",
-    "fallbackBaseUrls": ["http://127.0.0.1:5272", "http://127.0.0.1:59501"]
+    "fallbackBaseUrls": ["http://127.0.0.1:5272", "http://127.0.0.1:59501"],
+    "timeout": 300000
   },
   "models": {
     "reasoning": { "id": "Phi-3.5-mini-instruct-generic-gpu:1", "temperature": 0.3 },
@@ -150,6 +169,21 @@ The app now probes multiple local Foundry endpoints automatically. If your Found
   "web": { "port": 3000, "host": "127.0.0.1" }
 }
 ```
+
+For slower CPU models, increase `foundryLocal.timeout` (for example `300000` = 5 minutes).
+
+Model profiles:
+* `cpu-balanced` (default): stronger reasoning model + CPU chat/coding
+* `cpu-fast`: single fast CPU model for all roles
+
+You can switch profile with:
+
+```powershell
+$env:MODEL_PROFILE="cpu-fast"
+npm run cli
+```
+
+If the CLI returns to `you>` with no visible answer, the app now treats that as a model error (`empty response body`) so you can diagnose it instead of getting a silent blank output.
 
 PowerShell note: use semicolons instead of `&&` on older Windows PowerShell:
 
@@ -164,6 +198,35 @@ npm run lint; npm test; npm start; npm run web
 ```bash
 npm test
 ```
+
+If a test hangs, run:
+
+```bash
+npm run test:handles
+```
+
+## Quickstart (2 minutes)
+
+1. `foundry service start`
+2. `npm install`
+3. `node diagnose.js`
+4. `npm run cli` or `npm run web`
+5. In VS Code (extension host), run `localCopilot.diagnostics` once.
+
+## Troubleshooting Decision Tree
+
+1. No response at all:
+   * Run `node diagnose.js`.
+   * If service unavailable: `foundry service start`.
+
+2. Response times out:
+   * Use `cpu-fast` profile.
+   * Increase `foundryLocal.timeout` in `config/default.json`.
+
+3. OpenAI-compatible endpoint fails:
+   * Verify `OPENAI_BASE_URL`.
+   * Set `OPENAI_API_KEY`/`GITHUB_TOKEN`/`AZURE_INFERENCE_API_KEY`.
+   * Open diagnostics (`/api/diagnostics` or `localCopilot.diagnostics`).
 
 ---
 

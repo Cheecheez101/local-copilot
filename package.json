@@ -10,8 +10,9 @@
     "start": "node src/interfaces/cli-interface.js",
     "web": "node src/interfaces/web-interface.js",
     "cli": "node src/interfaces/cli-interface.js",
-    "test": "node --experimental-vm-modules node_modules/.bin/jest --forceExit",
-    "test:unit": "jest tests/unit --forceExit",
+    "test": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js",
+    "test:unit": "node ./node_modules/jest/bin/jest.js tests/unit",
+    "test:handles": "node ./node_modules/jest/bin/jest.js --detectOpenHandles",
     "lint": "eslint src/ tests/"
   },
   "keywords": [
