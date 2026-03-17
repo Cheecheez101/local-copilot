@@ -3,10 +3,19 @@
 
 const readline = require('readline');
 const path = require('path');
+const { exec } = require('child_process');
+const util = require('util');
 const { Orchestrator } = require('../core/orchestrator');
 const { ModelManager } = require('../core/model-manager');
 const { ContextManager } = require('../core/context-manager');
+const { SuggestionAgent } = require('../agents/suggestion-agent');
+const { FileAgent } = require('../agents/file-agent');
+const fileHandler = require('../utils/file-handler');
 const { validateStartupEnv } = require('../utils/startup-validation');
+const { redactSecrets } = require('../utils/logger');
+const { CLI_COMMANDS } = require('../config/command-spec');
+
+const execAsync = util.promisify(exec);
 
 // Avoid chalk ESM issues – use ANSI codes directly
 const BOLD = '\x1b[1m';
@@ -35,8 +44,13 @@ ${BOLD}Commands:${RESET}
   ${CYAN}/debug${RESET}                Debug code (--file=<path> --error=<msg>)
   ${CYAN}/analyze <file>${RESET}        Analyze a file
   ${CYAN}/dir <path>${RESET}            Analyze a directory
+  ${CYAN}/read <file>${RESET}           Read and print a file
+  ${CYAN}/write --file=<path> --content=<text>${RESET}  Write text to a file
   ${CYAN}/compare <a> <b>${RESET}       Compare two files
   ${CYAN}/models${RESET}               List available models
+  ${CYAN}/diagnostics${RESET}          Show service + model diagnostics
+  ${CYAN}/git-status${RESET}           Show git status
+  ${CYAN}/git-diff${RESET}             Show git diff (working + staged)
   ${CYAN}/history${RESET}              Show conversation history
   ${CYAN}/clear${RESET}                Clear conversation history
   ${CYAN}/help${RESET}                 Show this help message
@@ -73,6 +87,8 @@ class CLIInterface {
     const modelMgr = new ModelManager();
     const ctxMgr = new ContextManager();
     this.orchestrator = new Orchestrator({}, modelMgr, ctxMgr);
+    this.suggestionAgent = new SuggestionAgent(ctxMgr);
+    this.fileAgent = new FileAgent();
     this.sessionId = this.orchestrator.createSession({ interface: 'cli' });
     this.rl = null;
   }
@@ -95,6 +111,14 @@ class CLIInterface {
   /** Print a thinking indicator. */
   thinking() {
     process.stdout.write(`${DIM}Thinking…${RESET}\n`);
+  }
+
+  async runShell(command) {
+    const { stdout, stderr } = await execAsync(command, {
+      cwd: process.cwd(),
+      maxBuffer: 1024 * 1024 * 20,
+    });
+    return `${stdout || ''}${stderr ? `\n${stderr}` : ''}`.trim();
   }
 
   /**
@@ -123,7 +147,31 @@ class CLIInterface {
       const text = typeof response === 'string' ? response.trim() : String(response || '');
       this.print(text || `${YELLOW}[No response text returned by the model]${RESET}`);
     }
+    this.showSuggestions(this.buildLastAction(agent, response));
     this.print('');
+  }
+
+  buildLastAction(agent, response) {
+    if (agent === 'fileAnalysis' && response && Array.isArray(response.files)) {
+      return { type: 'FILE_LIST', result: response };
+    }
+    return { type: 'AGENT_RESULT', agent, result: response };
+  }
+
+  showSuggestions(lastAction) {
+    const suggestions = this.suggestionAgent.suggestNextAction(lastAction);
+    if (!Array.isArray(suggestions) || suggestions.length === 0) return;
+    this.print(`${DIM}Suggestions:${RESET}`);
+    for (const suggestion of suggestions) {
+      this.print(`  • ${suggestion.text}`);
+      if (Array.isArray(suggestion.actions)) {
+        for (const action of suggestion.actions) {
+          this.print(`    - ${action}`);
+        }
+      } else if (suggestion.action) {
+        this.print(`    - ${suggestion.action}`);
+      }
+    }
   }
 
   /**
@@ -172,6 +220,34 @@ class CLIInterface {
           this.print(`\n${BOLD}Available Models:${RESET}`);
           models.forEach((m) => this.print(`  • ${m}`));
           this.print('');
+          break;
+        }
+
+        case 'diagnostics': {
+          this.thinking();
+          const available = await this.orchestrator.isModelServiceAvailable();
+          const models = await this.orchestrator.listModels().catch(() => []);
+          const env = validateStartupEnv();
+          this.print(JSON.stringify(redactSecrets({
+            available,
+            models,
+            env,
+            timestamp: new Date().toISOString(),
+          }), null, 2));
+          break;
+        }
+
+        case 'git-status': {
+          this.thinking();
+          const out = await this.runShell('git --no-pager status --short --branch && git --no-pager log -1 --oneline');
+          this.print(out || 'Repository is clean.');
+          break;
+        }
+
+        case 'git-diff': {
+          this.thinking();
+          const out = await this.runShell('git --no-pager diff -- . && git --no-pager diff --cached -- .');
+          this.print(out || 'No changes to diff.');
           break;
         }
 
@@ -253,15 +329,49 @@ class CLIInterface {
           break;
         }
 
-        case 'dir': {
+        case 'dir':
+        case 'analyze-dir': {
           const dirPath = flags.path || rest;
           if (!dirPath) { this.error('Usage: /dir <directory> or /dir --path=<path>'); break; }
           this.thinking();
-          const result = await this.orchestrator.process('analyze directory', this.sessionId, {
-            agent: 'fileAnalysis',
-            dirPath: path.resolve(dirPath),
+          const listing = await this.fileAgent.listFiles(path.resolve(dirPath));
+          if (listing.error) {
+            this.error(listing.message);
+            break;
+          }
+          this.print(`\n${YELLOW}[Directory]${RESET} ${listing.path}`);
+          listing.files.forEach((f) => {
+            const size = f.size == null ? '' : ` (${f.size} bytes)`;
+            this.print(`  - [${f.type}] ${f.name}${size}`);
           });
-          this.displayResult(result.agent, result.response);
+          this.showSuggestions({ type: 'FILE_LIST', result: listing });
+          if (flags.analyze) {
+            const result = await this.orchestrator.process('analyze directory', this.sessionId, {
+              agent: 'fileAnalysis',
+              dirPath: path.resolve(dirPath),
+            });
+            this.displayResult(result.agent, result.response);
+          } else {
+            this.print('');
+          }
+          break;
+        }
+
+        case 'read': {
+          const filePath = flags.file || rest;
+          if (!filePath) { this.error('Usage: /read <file> or /read --file=<path>'); break; }
+          this.thinking();
+          const content = fileHandler.readFile(path.resolve(filePath));
+          this.print(content);
+          break;
+        }
+
+        case 'write': {
+          const filePath = flags.file;
+          const content = typeof flags.content === 'string' ? flags.content : rest;
+          if (!filePath) { this.error('Usage: /write --file=<path> --content=<text>'); break; }
+          fileHandler.writeFile(path.resolve(filePath), content || '');
+          this.success(`Wrote file: ${path.resolve(filePath)}`);
           break;
         }
 
@@ -279,7 +389,10 @@ class CLIInterface {
         }
 
         default:
-          this.error(`Unknown command: /${command}. Type /help for a list of commands.`);
+          {
+            const suggestion = CLI_COMMANDS.find((c) => c.startsWith(command)) || CLI_COMMANDS.find((c) => c.includes(command));
+            this.error(`Unknown command: /${command}. Type /help for a list of commands.${suggestion ? ` Did you mean /${suggestion}?` : ''}`);
+          }
       }
     } catch (err) {
       const errMsg = err?.message || String(err || 'Unknown error');
@@ -298,6 +411,11 @@ class CLIInterface {
    * @param {string} message
    */
   async handleMessage(message) {
+    const inline = String(message || '').match(/\/(dir|analyze-dir)\s+(.+)$/i);
+    if (inline) {
+      await this.handleCommand(inline[1].toLowerCase(), [inline[2].trim()]);
+      return;
+    }
     this.thinking();
     try {
       const result = await this.orchestrator.process(message, this.sessionId);

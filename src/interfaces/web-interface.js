@@ -88,9 +88,12 @@ function buildUI() {
     body{font-family:'Segoe UI',system-ui,sans-serif;background:#0d1117;color:#c9d1d9;height:100vh;display:flex;flex-direction:column}
     header{background:#161b22;padding:12px 20px;border-bottom:1px solid #30363d;display:flex;align-items:center;gap:12px}
     header h1{font-size:1.1rem;color:#58a6ff}
-    #diag-btn{background:#30363d;color:#c9d1d9;border:1px solid #484f58;border-radius:6px;padding:4px 10px;cursor:pointer}
     header .badge{background:#21262d;border:1px solid #30363d;border-radius:999px;padding:2px 10px;font-size:.75rem;color:#8b949e}
     #status{font-size:.75rem;color:#3fb950}
+    #workspace{flex:1;display:flex;min-height:0}
+    #sidebar{width:210px;background:#11161d;border-right:1px solid #30363d;padding:14px;display:flex;flex-direction:column;gap:8px}
+    .side-btn{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:8px 10px;cursor:pointer;text-align:left}
+    .side-btn:hover{background:#30363d}
     main{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:12px}
     .msg{max-width:80%;padding:12px 16px;border-radius:12px;font-size:.9rem;line-height:1.6;white-space:pre-wrap;word-break:break-word}
     .msg.user{align-self:flex-end;background:#1f6feb;color:#fff;border-bottom-right-radius:4px}
@@ -108,6 +111,8 @@ function buildUI() {
     #send-btn:disabled{opacity:.4;cursor:not-allowed}
     #upload-btn:disabled{opacity:.4;cursor:not-allowed}
     .thinking{color:#8b949e;font-style:italic}
+    .msg-actions{margin-top:8px;display:flex;gap:8px}
+    .mini-btn{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:.75rem}
     a{color:#58a6ff}
   </style>
 </head>
@@ -116,9 +121,16 @@ function buildUI() {
   <h1>🤖 Local AI Dev Co-Pilot</h1>
   <span class="badge">Offline · Private</span>
   <span id="status">Checking service…</span>
-  <button id="diag-btn">Diagnostics</button>
 </header>
-<main id="chat"></main>
+<div id="workspace">
+  <aside id="sidebar">
+    <button class="side-btn" id="diag-btn">Diagnostics</button>
+    <button class="side-btn" id="models-btn">Models</button>
+    <button class="side-btn" id="analyze-dir-btn">Analyze Directory</button>
+    <button class="side-btn" id="md-toggle-btn">Markdown: On</button>
+  </aside>
+  <main id="chat"></main>
+</div>
 <footer>
   <select id="agent-select">
     <option value="auto">Auto-route</option>
@@ -140,7 +152,11 @@ function buildUI() {
   const agentSelect = document.getElementById('agent-select');
   const statusEl = document.getElementById('status');
   const diagBtn = document.getElementById('diag-btn');
+  const modelsBtn = document.getElementById('models-btn');
+  const analyzeDirBtn = document.getElementById('analyze-dir-btn');
+  const mdToggleBtn = document.getElementById('md-toggle-btn');
   let sessionId = null;
+  let renderMarkdown = true;
 
   async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
     const controller = new AbortController();
@@ -209,14 +225,30 @@ function buildUI() {
       div.appendChild(lbl);
     }
     // Build markdown fence chars without raw backticks (this whole script lives in a template literal).
-    const codeFence = String.fromCharCode(96).repeat(3);
-    const codeBlockRe = new RegExp(codeFence + '(\\w*)\\n?([\\s\\S]*?)' + codeFence, 'g');
-    const formatted = text.replace(codeBlockRe, (_, lang, code) => {
-      return '<pre><code>' + code.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</code></pre>';
-    });
     const content = document.createElement('div');
-    content.innerHTML = formatted;
+    if (renderMarkdown) {
+      const codeFence = String.fromCharCode(96).repeat(3);
+      const codeBlockRe = new RegExp(codeFence + '(\\w*)\\n?([\\s\\S]*?)' + codeFence, 'g');
+      const formatted = String(text).replace(codeBlockRe, (_match, _lang, code) => {
+        return '<pre><code>' + code.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</code></pre>';
+      });
+      content.innerHTML = formatted;
+    } else {
+      content.textContent = String(text);
+    }
     div.appendChild(content);
+    if (role === 'ai') {
+      const actions = document.createElement('div');
+      actions.className = 'msg-actions';
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'mini-btn';
+      copyBtn.textContent = 'Copy';
+      copyBtn.addEventListener('click', async () => {
+        await navigator.clipboard.writeText(String(text));
+      });
+      actions.appendChild(copyBtn);
+      div.appendChild(actions);
+    }
     chat.appendChild(div);
     chat.scrollTop = chat.scrollHeight;
     return div;
@@ -350,6 +382,44 @@ function buildUI() {
     }
   }
 
+  async function showModels() {
+    try {
+      const res = await fetch('/api/models');
+      const data = await res.json();
+      addMessage('ai', JSON.stringify(data, null, 2), 'models');
+    } catch (err) {
+      addMessage('ai', 'Models fetch failed: ' + (err && err.message ? err.message : String(err)));
+    }
+  }
+
+  async function analyzeDirectoryShortcut() {
+    const dirPath = prompt('Directory path to analyze:', '.');
+    if (!dirPath) return;
+    await ensureSession();
+    addMessage('user', '/dir ' + dirPath);
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: 'analyze directory',
+        sessionId,
+        agent: 'fileAnalysis',
+        options: { dirPath }
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      addMessage('ai', 'Analyze directory failed: ' + (data.error || res.status), 'fileAnalysis');
+      return;
+    }
+    addMessage('ai', typeof data.response === 'string' ? data.response : JSON.stringify(data.response, null, 2), 'fileAnalysis');
+  }
+
+  function toggleMarkdown() {
+    renderMarkdown = !renderMarkdown;
+    mdToggleBtn.textContent = 'Markdown: ' + (renderMarkdown ? 'On' : 'Off');
+  }
+
   async function optimizeImageForUpload(file) {
     const objectUrl = URL.createObjectURL(file);
     try {
@@ -416,6 +486,9 @@ function buildUI() {
 
   sendBtn.addEventListener('click', send);
   diagBtn.addEventListener('click', showDiagnostics);
+  modelsBtn.addEventListener('click', showModels);
+  analyzeDirBtn.addEventListener('click', analyzeDirectoryShortcut);
+  mdToggleBtn.addEventListener('click', toggleMarkdown);
   uploadBtn.addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', async () => {
     const file = fileInput.files && fileInput.files[0];

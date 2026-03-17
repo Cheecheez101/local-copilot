@@ -70,10 +70,19 @@ class FileAnalysisAgent {
    */
   async analyzeDirectory(dirPath, sessionId) {
     const files = this.fileHandler.listDirectory(dirPath, true);
-    const fileList = files
+    const isExcludedPath = (p) => {
+      const normalized = String(p).replace(/\\/g, '/').toLowerCase();
+      return normalized.includes('/node_modules/')
+        || normalized.includes('/.git/')
+        || normalized.includes('/dist/')
+        || normalized.includes('/build/')
+        || normalized.includes('/coverage/');
+    };
+
+    const fileEntries = files
       .filter((f) => {
         try {
-          return this.fileHandler.getMetadata(f).isFile;
+          return this.fileHandler.getMetadata(f).isFile && !isExcludedPath(f);
         } catch {
           return false;
         }
@@ -81,13 +90,52 @@ class FileAnalysisAgent {
       .map((f) => {
         const lang = this.fileHandler.detectLanguage(f);
         const meta = this.fileHandler.getMetadata(f);
-        return `- ${f} (${lang}, ${meta.size} bytes)`;
-      })
-      .join('\n');
+        return { path: f, lang, size: meta.size };
+      });
+
+    const MAX_FILES = 250;
+    const MAX_FILELIST_CHARS = 14000;
+    const limitedFiles = fileEntries.slice(0, MAX_FILES);
+    let fileList = '';
+    for (const entry of limitedFiles) {
+      const line = `- ${entry.path} (${entry.lang}, ${entry.size} bytes)\n`;
+      if (fileList.length + line.length > MAX_FILELIST_CHARS) {
+        break;
+      }
+      fileList += line;
+    }
+
+    const languageCounts = new Map();
+    let totalSize = 0;
+    for (const entry of fileEntries) {
+      totalSize += entry.size;
+      languageCounts.set(entry.lang, (languageCounts.get(entry.lang) || 0) + 1);
+    }
+    const topLanguages = Array.from(languageCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([lang, count]) => `${lang}: ${count}`)
+      .join(', ');
+    const omitted = fileEntries.length - limitedFiles.length;
 
     this.contextManager.setSystemPrompt(sessionId, SYSTEM_PROMPT);
 
-    const prompt = `Analyze the following directory structure and provide an overview of the codebase:\n\nDirectory: ${dirPath}\n\nFiles:\n${fileList}\n\nProvide:\n1. Project purpose and architecture\n2. Key components and their roles\n3. Technology stack\n4. Suggestions for improvement`;
+    const prompt = `Analyze this directory and provide a high-level codebase overview.
+
+Directory: ${dirPath}
+Total files considered: ${fileEntries.length}
+Total size: ${totalSize} bytes
+Top languages: ${topLanguages || 'unknown'}
+${omitted > 0 ? `Omitted from listing due to limits: ${omitted}` : ''}
+
+Sample file listing (truncated):
+${fileList || '- (no files listed)'}
+
+Provide:
+1. Project purpose and architecture
+2. Key components and their roles
+3. Technology stack
+4. Suggestions for improvement`;
 
     this.contextManager.addMessage(sessionId, 'user', prompt);
     const messages = this.contextManager.getHistory(sessionId);

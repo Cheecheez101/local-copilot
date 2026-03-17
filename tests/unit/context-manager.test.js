@@ -115,4 +115,24 @@ describe('ContextManager', () => {
       expect(ids).toContain(id2);
     });
   });
+
+  describe('runtime context memory', () => {
+    it('remembers path and intent from conversation', () => {
+      ctx.remember('please check files in C:\\Users\\Administrator\\projects\\local-copilot');
+      const context = ctx.getRelevantContext();
+      expect(context.lastPath).toContain('C:\\Users\\Administrator\\projects\\local-copilot');
+      expect(context.projectPath).toContain('projects');
+      expect(context.currentIntent).toBe('check files');
+    });
+
+    it('tracks recent user commands from added messages', () => {
+      const id = ctx.createSession();
+      ctx.addMessage(id, 'user', 'open project');
+      ctx.addMessage(id, 'user', 'run tests');
+      ctx.addMessage(id, 'user', 'check files');
+      ctx.addMessage(id, 'user', 'another command');
+      const context = ctx.getRelevantContext();
+      expect(context.recentCommands).toEqual(['run tests', 'check files', 'another command']);
+    });
+  });
 });

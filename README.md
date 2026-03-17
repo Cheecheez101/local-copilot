@@ -83,14 +83,19 @@ Available commands inside the REPL:
 | Command | Description |
 |---------|-------------|
 | `/plan <task>` | Create a step-by-step plan |
-| `/code <desc> [--lang=js]` | Generate code |
+| `/code <desc> [--lang=js] [--file=<path> or --files=a,b]` | Generate code with optional local file context |
 | `/review --file=<path>` | Review a file |
 | `/refactor --file=<path> [--goal=…]` | Refactor a file |
 | `/debug --file=<path> [--error=…]` | Debug a file |
 | `/analyze <file>` | Summarise a file |
-| `/dir <path>` | Analyse a directory |
+| `/dir <path> [--analyze]` | List directory contents directly from local filesystem (`--analyze` adds AI summary) |
+| `/read <file>` | Read and print a file directly |
+| `/write --file=<path> --content=<text>` | Write text directly to a file |
 | `/compare <a> <b>` | Compare two files |
 | `/models` | List available Foundry Local models |
+| `/diagnostics` | Show service + model diagnostics |
+| `/git-status` | Show git status + latest commit |
+| `/git-diff` | Show working/staged diff |
 | `/history` | Show conversation history |
 | `/clear` | Clear conversation history |
 | `/help` | Show help |
@@ -116,6 +121,9 @@ The web UI exposes:
 * `POST /api/session`   – create a new session
 * `POST /api/chat`      – send a message
 * `GET  /api/models`    – list available models
+* `GET  /api/diagnostics` – diagnostics payload
+
+Web UI includes a sidebar with shortcuts for Diagnostics, Models, and Analyze Directory, plus a markdown render toggle and copy button on AI responses.
 
 ### VS Code Extension
 
@@ -128,14 +136,33 @@ extension lifecycle (`activate` / `deactivate`). Commands registered:
 | `localCopilot.review` | Review current file |
 | `localCopilot.refactor` | Refactor selected code |
 | `localCopilot.generate` | Generate code from description |
+| `localCopilot.analyzeDirectory` | Analyze a directory (VS prompt input) |
 | `localCopilot.runTests` | Run project test suite (`npm test`) |
 | `localCopilot.gitStatus` | Show git branch, status, and latest commit |
 | `localCopilot.gitDiff` | Show working tree + staged diff |
 | `localCopilot.draftCommitMessage` | Draft commit message from staged diff |
 | `localCopilot.toggleTestOnSave` | Toggle auto-running tests on file save |
 | `localCopilot.diagnostics` | Open diagnostics panel |
+| `localCopilot.quickActions` | Open one-click quick actions picker |
 | `localCopilot.ask` | Ask a free-form question |
 | `localCopilot.clearHistory` | Clear conversation history |
+
+Manual smoke test (Extension Development Host):
+
+1. Reload the VS Code window with `Developer: Reload Window`.
+2. Run `Local AI Copilot: Analyze Directory` from the Command Palette.
+3. Open `View -> Output` and choose `Local AI Co-Pilot` from the dropdown.
+4. Confirm you see the activation line plus command output for the action you ran.
+
+Package + install smoke test (`.vsix`):
+
+1. Build package: `npm run package:vsix`
+2. Install in VS Code: `code --install-extension local-ai-dev-copilot-1.0.0.vsix`
+3. Reload window and run `Local AI Copilot: Quick Actions`.
+4. Validate keybindings:
+   * `Ctrl+Alt+L` -> Quick Actions
+   * `Ctrl+Alt+K` -> Ask Copilot
+5. Run `Local AI Copilot: Open Diagnostics` and verify diagnostics render.
 
 ---
 

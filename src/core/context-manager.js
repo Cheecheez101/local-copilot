@@ -12,6 +12,60 @@ class ContextManager {
   constructor(options = {}) {
     this.maxHistory = options.maxHistory || 20;
     this.sessions = new Map();
+    this.runtimeContext = {
+      os: process.platform,
+      cwd: process.cwd(),
+      previousCommands: [],
+      userPreferences: {},
+      sessionStart: Date.now(),
+      lastPath: undefined,
+      projectPath: undefined,
+      currentIntent: undefined,
+    };
+  }
+
+  remember(conversation) {
+    const text = String(conversation || '');
+    if (!text) return;
+
+    const extractedPath = this.extractPath(text);
+    if (extractedPath) {
+      this.runtimeContext.lastPath = extractedPath;
+    }
+
+    const projectMatch = text.match(/[A-Za-z]:\\[^"'`\r\n]*projects(?:\\[^"'`\r\n]*)?/i)
+      || text.match(/[A-Za-z]:\/[^"'`\r\n]*projects(?:\/[^"'`\r\n]*)?/i);
+    if (projectMatch?.[0]) {
+      this.runtimeContext.projectPath = projectMatch[0];
+    }
+
+    this.runtimeContext.currentIntent = this.detectIntent(text);
+  }
+
+  extractPath(text) {
+    const windowsPath = String(text || '').match(/[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*[^\\/:*?"<>|\r\n]*/);
+    if (windowsPath?.[0]) return windowsPath[0];
+    const slashPath = String(text || '').match(/[A-Za-z]:\/(?:[^/:\r\n]+\/)*[^/:\r\n]*/);
+    return slashPath?.[0] || null;
+  }
+
+  detectIntent(text) {
+    const input = String(text || '').toLowerCase();
+    if (/list|show|check|scan/.test(input) && /file|folder|dir|directory/.test(input)) return 'check files';
+    if (/\brun\b|\bexecute\b|\bstart\b/.test(input)) return 'run';
+    if (/\bopen\b|\blaunch\b/.test(input)) return 'open';
+    if (/\btest\b/.test(input)) return 'test';
+    return 'general';
+  }
+
+  getRelevantContext() {
+    return {
+      os: this.runtimeContext.os,
+      lastPath: this.runtimeContext.lastPath,
+      projectPath: this.runtimeContext.projectPath,
+      recentCommands: this.runtimeContext.previousCommands.slice(-3),
+      currentIntent: this.runtimeContext.currentIntent,
+    };
   }
 
   /**
@@ -67,6 +121,13 @@ class ContextManager {
 
     session.messages.push({ role, content, timestamp: new Date() });
     session.updatedAt = new Date();
+    if (role === 'user') {
+      this.runtimeContext.previousCommands.push(String(content || ''));
+      if (this.runtimeContext.previousCommands.length > 50) {
+        this.runtimeContext.previousCommands = this.runtimeContext.previousCommands.slice(-50);
+      }
+      this.remember(content);
+    }
 
     // Keep only the last N non-system messages, but always preserve system messages
     const systemMessages = session.messages.filter((m) => m.role === 'system');

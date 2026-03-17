@@ -1,0 +1,10 @@
+tests/**
+.git/**
+.github/**
+.copilot/**
+coverage/**
+HANG_FIX_COMPLETE.md
+HANG_FIX_DOCUMENTATION.md
+TROUBLESHOOTING.md
+diagnose.js
+settings.yml

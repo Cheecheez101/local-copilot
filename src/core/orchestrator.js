@@ -87,7 +87,10 @@ class Orchestrator {
    * @returns {Promise<{ agent: string, response: any }>}
    */
   async process(task, sessionId, options = {}) {
-    const intent = options.agent || this.classifyIntent(task);
+    const forcedReasoning = !options.agent
+      && typeof this.reasoningAgent?.isFileOperation === 'function'
+      && this.reasoningAgent.isFileOperation(task);
+    const intent = forcedReasoning ? 'reasoning' : (options.agent || this.classifyIntent(task));
 
     switch (intent) {
       case 'coding':
@@ -107,7 +110,9 @@ class Orchestrator {
   async _handleReasoningTask(task, sessionId, options) {
     let response;
 
-    if (options.compareOptions && Array.isArray(options.compareOptions)) {
+    if (typeof this.reasoningAgent?.process === 'function' && this.reasoningAgent.isFileOperation?.(task)) {
+      response = await this.reasoningAgent.process(task, sessionId);
+    } else if (options.compareOptions && Array.isArray(options.compareOptions)) {
       response = await this.reasoningAgent.compareOptions(
         options.compareOptions,
         options.criteria || task,

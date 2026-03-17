@@ -8,7 +8,9 @@ const fileHandler = require('../../src/utils/file-handler');
  * Create a lightweight mock agent that returns a canned result.
  */
 function createMockAgent(role) {
-  return {
+    return {
+    process: jest.fn().mockResolvedValue('mock process'),
+    isFileOperation: jest.fn().mockReturnValue(false),
     plan: jest.fn().mockResolvedValue('mock plan'),
     reason: jest.fn().mockResolvedValue('mock reason'),
     diagnose: jest.fn().mockResolvedValue('mock diagnosis'),
@@ -101,8 +103,15 @@ describe('Orchestrator', () => {
       expect(mockAgents.coding.generate).toHaveBeenCalled();
     });
 
+    it('routes natural file operations to reasoning process handler', async () => {
+      mockAgents.reasoning.isFileOperation.mockReturnValue(true);
+      const result = await orchestrator.process('delete file test.txt', sessionId);
+      expect(result.agent).toBe('reasoning');
+      expect(mockAgents.reasoning.process).toHaveBeenCalledWith('delete file test.txt', sessionId);
+    });
+
     it('passes explicit file context to coding generation', async () => {
-      jest.spyOn(fileHandler, 'readFile').mockReturnValue('const fromFile = true;');
+      const readSpy = jest.spyOn(fileHandler, 'readFile').mockReturnValue('const fromFile = true;');
       await orchestrator.process(
         'generate based on local file',
         sessionId,
@@ -116,6 +125,7 @@ describe('Orchestrator', () => {
           files: [expect.objectContaining({ path: 'sample.js', content: 'const fromFile = true;' })],
         })
       );
+      readSpy.mockRestore();
     });
 
     it('routes to fileAnalysis agent when filePath is provided', async () => {

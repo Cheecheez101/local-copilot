@@ -18,11 +18,14 @@
 const { Orchestrator } = require('../core/orchestrator');
 const { ModelManager } = require('../core/model-manager');
 const { ContextManager } = require('../core/context-manager');
+const { SuggestionAgent } = require('../agents/suggestion-agent');
 const { AIToolkitIntegration } = require('../vscode/ai-toolkit-integration');
 const { exec } = require('child_process');
 const util = require('util');
+const path = require('path');
 const { validateStartupEnv } = require('../utils/startup-validation');
 const { redactSecrets } = require('../utils/logger');
+const { VS_QUICK_ACTIONS } = require('../config/command-spec');
 
 const execAsync = util.promisify(exec);
 
@@ -38,8 +41,17 @@ let orchestrator = null;
 let sessionId = null;
 let outputChannel = null;
 let toolkitIntegration = null;
+let suggestionAgent = null;
 let testOnSaveEnabled = false;
 let testOnSaveDisposable = null;
+
+function ensureOutputChannel() {
+  if (!vscode) return null;
+  if (!outputChannel) {
+    outputChannel = vscode.window.createOutputChannel('Local AI Co-Pilot');
+  }
+  return outputChannel;
+}
 
 /**
  * Initialise the shared orchestrator + session used across all commands.
@@ -49,7 +61,32 @@ function initOrchestrator() {
     const modelMgr = new ModelManager();
     const ctxMgr = new ContextManager();
     orchestrator = new Orchestrator({}, modelMgr, ctxMgr);
+    suggestionAgent = new SuggestionAgent(ctxMgr);
     sessionId = orchestrator.createSession({ interface: 'vscode' });
+  }
+}
+
+function buildLastAction(agent, response) {
+  if (agent === 'fileAnalysis' && response && Array.isArray(response.files)) {
+    return { type: 'FILE_LIST', result: response };
+  }
+  return { type: 'AGENT_RESULT', agent, result: response };
+}
+
+function showSuggestions(agent, response) {
+  if (!suggestionAgent) return;
+  const suggestions = suggestionAgent.suggestNextAction(buildLastAction(agent, response));
+  if (!Array.isArray(suggestions) || suggestions.length === 0) return;
+  showOutput('--- Suggestions ---');
+  for (const suggestion of suggestions) {
+    showOutput(`• ${suggestion.text}`);
+    if (Array.isArray(suggestion.actions)) {
+      for (const action of suggestion.actions) {
+        showOutput(`  - ${action}`);
+      }
+    } else if (suggestion.action) {
+      showOutput(`  - ${suggestion.action}`);
+    }
   }
 }
 
@@ -58,9 +95,10 @@ function initOrchestrator() {
  * @param {string} text
  */
 function showOutput(text) {
-  if (outputChannel) {
-    outputChannel.appendLine(text);
-    outputChannel.show(true);
+  const channel = ensureOutputChannel();
+  if (channel) {
+    channel.appendLine(text);
+    channel.show(true);
   } else {
     console.log(text);
   }
@@ -172,6 +210,7 @@ async function cmdExplain() {
     );
     const text = typeof result.response === 'string' ? result.response : JSON.stringify(result.response, null, 2);
     showOutput(text);
+    showSuggestions(result.agent, result.response);
     return text;
   });
 }
@@ -196,6 +235,7 @@ async function cmdReview() {
     const text = typeof result.response === 'string' ? result.response
       : result.response.explanation || JSON.stringify(result.response, null, 2);
     showOutput(text);
+    showSuggestions(result.agent, result.response);
     return text;
   });
 }
@@ -226,6 +266,7 @@ async function cmdRefactor() {
     });
     const text = result.response.explanation || result.response.code || JSON.stringify(result.response, null, 2);
     showOutput(text);
+    showSuggestions(result.agent, result.response);
     return text;
   });
 }
@@ -254,7 +295,37 @@ async function cmdGenerateCode() {
       await insertAtCursor('\n' + code + '\n');
     }
     showOutput(result.response.explanation || code);
+    showSuggestions(result.agent, result.response);
     return code;
+  });
+}
+
+async function cmdAnalyzeDirectory() {
+  initOrchestrator();
+  if (!vscode) return;
+
+  const root = getWorkspaceRoot();
+  const dirInput = await vscode.window.showInputBox({
+    prompt: 'Directory path to analyze',
+    placeHolder: 'e.g. . or src',
+    value: root,
+  });
+
+  if (!dirInput) return;
+  const dirPath = path.isAbsolute(dirInput) ? dirInput : path.resolve(root, dirInput);
+
+  showOutput(`--- Analyze Directory: ${dirPath} ---`);
+  await withProgress('Analyzing directory…', async () => {
+    const result = await orchestrator.process('analyze directory', sessionId, {
+      agent: 'fileAnalysis',
+      dirPath,
+    });
+    const text = typeof result.response === 'string'
+      ? result.response
+      : JSON.stringify(result.response, null, 2);
+    showOutput(text);
+    showSuggestions(result.agent, result.response);
+    return text;
   });
 }
 
@@ -274,6 +345,7 @@ async function cmdAsk() {
     const result = await orchestrator.process(question, sessionId);
     const text = typeof result.response === 'string' ? result.response : JSON.stringify(result.response, null, 2);
     showOutput(text);
+    showSuggestions(result.agent, result.response);
     return text;
   });
 }
@@ -401,6 +473,14 @@ async function cmdDiagnostics() {
   panel.webview.html = `<html><body><h2>Local AI Diagnostics</h2><pre>${JSON.stringify(redactSecrets(payload), null, 2)}</pre></body></html>`;
 }
 
+async function cmdQuickActions() {
+  if (!vscode) return;
+  const selected = await vscode.window.showQuickPick(VS_QUICK_ACTIONS, { placeHolder: 'Local AI quick actions' });
+  if (selected?.command) {
+    await vscode.commands.executeCommand(selected.command);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // VS Code extension lifecycle
 // ---------------------------------------------------------------------------
@@ -412,7 +492,7 @@ async function cmdDiagnostics() {
 function activate(context) {
   if (!vscode) return;
 
-  outputChannel = vscode.window.createOutputChannel('Local AI Co-Pilot');
+  ensureOutputChannel();
   outputChannel.appendLine('Local AI Dev Co-Pilot activated.');
   const env = validateStartupEnv();
   if (env.errors.length || env.warnings.length) {
@@ -424,11 +504,13 @@ function activate(context) {
     ['localCopilot.review', cmdReview],
     ['localCopilot.refactor', cmdRefactor],
     ['localCopilot.generate', cmdGenerateCode],
+    ['localCopilot.analyzeDirectory', cmdAnalyzeDirectory],
     ['localCopilot.runTests', cmdRunTests],
     ['localCopilot.gitStatus', cmdGitStatus],
     ['localCopilot.gitDiff', cmdGitDiff],
     ['localCopilot.draftCommitMessage', cmdDraftCommitMessage],
     ['localCopilot.diagnostics', cmdDiagnostics],
+    ['localCopilot.quickActions', cmdQuickActions],
     ['localCopilot.ask', cmdAsk],
     ['localCopilot.clearHistory', cmdClearHistory],
   ];
@@ -470,6 +552,7 @@ function deactivate() {
   orchestrator = null;
   sessionId = null;
   toolkitIntegration = null;
+  suggestionAgent = null;
   testOnSaveEnabled = false;
   if (testOnSaveDisposable) {
     testOnSaveDisposable.dispose();
