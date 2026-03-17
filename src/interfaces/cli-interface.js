@@ -1,0 +1,353 @@
+#!/usr/bin/env node
+'use strict';
+
+const readline = require('readline');
+const path = require('path');
+const { Orchestrator } = require('../core/orchestrator');
+const { ModelManager } = require('../core/model-manager');
+const { ContextManager } = require('../core/context-manager');
+
+// Avoid chalk ESM issues – use ANSI codes directly
+const BOLD = '\x1b[1m';
+const DIM = '\x1b[2m';
+const RESET = '\x1b[0m';
+const CYAN = '\x1b[36m';
+const GREEN = '\x1b[32m';
+const YELLOW = '\x1b[33m';
+const RED = '\x1b[31m';
+const BLUE = '\x1b[34m';
+const MAGENTA = '\x1b[35m';
+
+const BANNER = `
+${CYAN}${BOLD}╔══════════════════════════════════════════════╗
+║        Local AI Dev Co-Pilot  v1.0.0         ║
+║  Offline · Private · Fast · Multi-Agent AI   ║
+╚══════════════════════════════════════════════╝${RESET}
+`;
+
+const HELP = `
+${BOLD}Commands:${RESET}
+  ${CYAN}/plan <task>${RESET}           Create a step-by-step plan
+  ${CYAN}/code <description>${RESET}    Generate code (use --lang=<lang>)
+  ${CYAN}/review${RESET}               Review code from clipboard or file (--file=<path>)
+  ${CYAN}/refactor${RESET}             Refactor code (--file=<path> --goal=<goal>)
+  ${CYAN}/debug${RESET}                Debug code (--file=<path> --error=<msg>)
+  ${CYAN}/analyze <file>${RESET}        Analyze a file
+  ${CYAN}/dir <path>${RESET}            Analyze a directory
+  ${CYAN}/compare <a> <b>${RESET}       Compare two files
+  ${CYAN}/models${RESET}               List available models
+  ${CYAN}/history${RESET}              Show conversation history
+  ${CYAN}/clear${RESET}                Clear conversation history
+  ${CYAN}/help${RESET}                 Show this help message
+  ${CYAN}/exit${RESET}                 Exit the application
+
+${DIM}Or just type a message for general AI assistance.${RESET}
+`;
+
+/**
+ * Parse simple flag arguments from a CLI argument array.
+ * e.g. ["--lang=python", "--file=/tmp/x.py"] → { lang: 'python', file: '/tmp/x.py' }
+ */
+function parseFlags(args) {
+  const flags = {};
+  const positional = [];
+
+  for (const arg of args) {
+    if (arg.startsWith('--')) {
+      const [key, ...rest] = arg.slice(2).split('=');
+      flags[key] = rest.length > 0 ? rest.join('=') : true;
+    } else {
+      positional.push(arg);
+    }
+  }
+
+  return { flags, positional };
+}
+
+/**
+ * CLIInterface – interactive command-line interface for the Local AI Dev Co-Pilot.
+ */
+class CLIInterface {
+  constructor() {
+    const modelMgr = new ModelManager();
+    const ctxMgr = new ContextManager();
+    this.orchestrator = new Orchestrator({}, modelMgr, ctxMgr);
+    this.sessionId = this.orchestrator.createSession({ interface: 'cli' });
+    this.rl = null;
+  }
+
+  /** Print formatted text to stdout. */
+  print(text) {
+    process.stdout.write(text + '\n');
+  }
+
+  /** Print an error message. */
+  error(text) {
+    this.print(`${RED}Error: ${text}${RESET}`);
+  }
+
+  /** Print a success message. */
+  success(text) {
+    this.print(`${GREEN}${text}${RESET}`);
+  }
+
+  /** Print a thinking indicator. */
+  thinking() {
+    process.stdout.write(`${DIM}Thinking…${RESET}\n`);
+  }
+
+  /**
+   * Display the result from an agent.
+   * @param {string} agent    - Agent name.
+   * @param {*}      response - Agent response.
+   */
+  displayResult(agent, response) {
+    const agentLabel = {
+      reasoning: `${BLUE}[Reasoning Agent]${RESET}`,
+      coding: `${MAGENTA}[Coding Agent]${RESET}`,
+      fileAnalysis: `${YELLOW}[File Analysis Agent]${RESET}`,
+    }[agent] || `${CYAN}[AI]${RESET}`;
+
+    this.print(`\n${agentLabel}`);
+
+    if (typeof response === 'object' && response !== null) {
+      if (response.code) {
+        this.print(response.explanation || response.code);
+      } else if (response.fix) {
+        this.print(response.explanation || response.fix);
+      } else {
+        this.print(JSON.stringify(response, null, 2));
+      }
+    } else {
+      this.print(response);
+    }
+    this.print('');
+  }
+
+  /**
+   * Handle a parsed command.
+   * @param {string}   command  - Command name (without the leading slash).
+   * @param {string[]} args     - Command arguments.
+   */
+  async handleCommand(command, args) {
+    const { flags, positional } = parseFlags(args);
+    const rest = positional.join(' ');
+
+    try {
+      switch (command) {
+        case 'help':
+          this.print(HELP);
+          break;
+
+        case 'exit':
+        case 'quit':
+          this.print(`\n${GREEN}Goodbye!${RESET}\n`);
+          this.rl.close();
+          process.exit(0);
+          break;
+
+        case 'clear':
+          this.orchestrator.clearHistory(this.sessionId);
+          this.success('Conversation history cleared.');
+          break;
+
+        case 'history': {
+          const history = this.orchestrator.getHistory(this.sessionId);
+          if (history.length === 0) {
+            this.print(`${DIM}No history yet.${RESET}`);
+          } else {
+            history.forEach((m) => {
+              const label = m.role === 'user' ? `${CYAN}You${RESET}` : `${GREEN}AI${RESET}`;
+              this.print(`${label}: ${m.content.slice(0, 200)}${m.content.length > 200 ? '…' : ''}`);
+            });
+          }
+          break;
+        }
+
+        case 'models': {
+          this.thinking();
+          const models = await this.orchestrator.listModels();
+          this.print(`\n${BOLD}Available Models:${RESET}`);
+          models.forEach((m) => this.print(`  • ${m}`));
+          this.print('');
+          break;
+        }
+
+        case 'plan': {
+          if (!rest) { this.error('Usage: /plan <task description>'); break; }
+          this.thinking();
+          const result = await this.orchestrator.process(rest, this.sessionId, { agent: 'reasoning' });
+          this.displayResult(result.agent, result.response);
+          break;
+        }
+
+        case 'code': {
+          if (!rest) { this.error('Usage: /code <description> [--lang=javascript]'); break; }
+          this.thinking();
+          const language = flags.lang || flags.language || 'javascript';
+          const result = await this.orchestrator.process(rest, this.sessionId, { agent: 'coding', language });
+          this.displayResult(result.agent, result.response);
+          break;
+        }
+
+        case 'review': {
+          const filePath = flags.file;
+          if (!filePath) { this.error('Usage: /review --file=<path>'); break; }
+          this.thinking();
+          const language = flags.lang || flags.language || '';
+          const result = await this.orchestrator.process('review this code', this.sessionId, {
+            agent: 'coding',
+            code: require('../utils/file-handler').readFile(filePath),
+            language,
+          });
+          this.displayResult(result.agent, result.response);
+          break;
+        }
+
+        case 'refactor': {
+          const filePath = flags.file;
+          if (!filePath) { this.error('Usage: /refactor --file=<path> [--goal=<goal>]'); break; }
+          this.thinking();
+          const language = flags.lang || flags.language || '';
+          const goal = flags.goal || rest;
+          const result = await this.orchestrator.process(`refactor ${goal}`, this.sessionId, {
+            agent: 'coding',
+            code: require('../utils/file-handler').readFile(filePath),
+            language,
+          });
+          this.displayResult(result.agent, result.response);
+          break;
+        }
+
+        case 'debug': {
+          const filePath = flags.file;
+          if (!filePath) { this.error('Usage: /debug --file=<path> [--error=<message>]'); break; }
+          this.thinking();
+          const language = flags.lang || flags.language || '';
+          const result = await this.orchestrator.process('debug this code', this.sessionId, {
+            agent: 'coding',
+            code: require('../utils/file-handler').readFile(filePath),
+            language,
+            error: flags.error || '',
+          });
+          this.displayResult(result.agent, result.response);
+          break;
+        }
+
+        case 'analyze': {
+          const filePath = flags.file || rest;
+          if (!filePath) { this.error('Usage: /analyze <file> or /analyze --file=<path>'); break; }
+          this.thinking();
+          const result = await this.orchestrator.process('analyze file', this.sessionId, {
+            agent: 'fileAnalysis',
+            filePath: path.resolve(filePath),
+          });
+          this.displayResult(result.agent, result.response);
+          break;
+        }
+
+        case 'dir': {
+          const dirPath = flags.path || rest;
+          if (!dirPath) { this.error('Usage: /dir <directory> or /dir --path=<path>'); break; }
+          this.thinking();
+          const result = await this.orchestrator.process('analyze directory', this.sessionId, {
+            agent: 'fileAnalysis',
+            dirPath: path.resolve(dirPath),
+          });
+          this.displayResult(result.agent, result.response);
+          break;
+        }
+
+        case 'compare': {
+          const [fileA, fileB] = positional;
+          if (!fileA || !fileB) { this.error('Usage: /compare <file-a> <file-b>'); break; }
+          this.thinking();
+          const result = await this.orchestrator.process('compare files', this.sessionId, {
+            agent: 'fileAnalysis',
+            filePath: path.resolve(fileA),
+            filePathB: path.resolve(fileB),
+          });
+          this.displayResult(result.agent, result.response);
+          break;
+        }
+
+        default:
+          this.error(`Unknown command: /${command}. Type /help for a list of commands.`);
+      }
+    } catch (err) {
+      this.error(err.message);
+    }
+  }
+
+  /**
+   * Handle a free-form message (auto-routes to best agent).
+   * @param {string} message
+   */
+  async handleMessage(message) {
+    this.thinking();
+    try {
+      const result = await this.orchestrator.process(message, this.sessionId);
+      this.displayResult(result.agent, result.response);
+    } catch (err) {
+      this.error(err.message);
+    }
+  }
+
+  /**
+   * Start the interactive CLI session.
+   */
+  async start() {
+    this.print(BANNER);
+
+    // Check model service availability
+    const available = await this.orchestrator.isModelServiceAvailable();
+    if (available) {
+      this.success('✓ Foundry Local service is running.');
+    } else {
+      this.print(`${YELLOW}⚠  Foundry Local is not running. Start it to enable AI features.${RESET}`);
+      this.print(`${DIM}   See: https://github.com/microsoft/Foundry${RESET}`);
+    }
+
+    this.print(`${DIM}Type /help for available commands.${RESET}\n`);
+
+    this.rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      terminal: true,
+    });
+
+    const prompt = () => process.stdout.write(`${CYAN}you>${RESET} `);
+
+    prompt();
+
+    this.rl.on('line', async (line) => {
+      const input = line.trim();
+      if (!input) { prompt(); return; }
+
+      if (input.startsWith('/')) {
+        const [command, ...args] = input.slice(1).split(/\s+/);
+        await this.handleCommand(command.toLowerCase(), args);
+      } else {
+        await this.handleMessage(input);
+      }
+
+      prompt();
+    });
+
+    this.rl.on('close', () => {
+      this.print(`\n${GREEN}Session ended.${RESET}`);
+      process.exit(0);
+    });
+  }
+}
+
+// Run when executed directly
+if (require.main === module) {
+  const cli = new CLIInterface();
+  cli.start().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
+
+module.exports = { CLIInterface };
