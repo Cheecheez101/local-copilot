@@ -1,25 +1,29 @@
 {
   "foundryLocal": {
     "baseUrl": "http://localhost:5272",
+    "fallbackBaseUrls": [
+      "http://127.0.0.1:5272",
+      "http://127.0.0.1:59501"
+    ],
     "apiPath": "/v1/chat/completions",
     "modelsPath": "/v1/models",
     "timeout": 60000
   },
   "models": {
     "reasoning": {
-      "id": "phi-3.5-mini-instruct-generic-gpu",
+      "id": "Phi-3.5-mini-instruct-generic-gpu:1",
       "alias": "reasoning",
       "maxTokens": 2048,
       "temperature": 0.3
     },
     "coding": {
-      "id": "phi-3.5-mini-instruct-generic-gpu",
+      "id": "Phi-3.5-mini-instruct-generic-gpu:1",
       "alias": "coding",
       "maxTokens": 4096,
       "temperature": 0.1
     },
     "fileAnalysis": {
-      "id": "phi-3.5-mini-instruct-generic-gpu",
+      "id": "Phi-3.5-mini-instruct-generic-gpu:1",
       "alias": "fileAnalysis",
       "maxTokens": 4096,
       "temperature": 0.2

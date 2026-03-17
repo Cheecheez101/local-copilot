@@ -150,8 +150,9 @@ function buildUI() {
       lbl.textContent = agentName + ' agent';
       div.appendChild(lbl);
     }
-    // Render code blocks using RegExp constructor to avoid template-literal double-escaping
-    const codeBlockRe = new RegExp('```(\\w*)\\n?([\\s\\S]*?)```', 'g');
+    // Build markdown fence chars without raw backticks (this whole script lives in a template literal).
+    const codeFence = String.fromCharCode(96).repeat(3);
+    const codeBlockRe = new RegExp(codeFence + '(\\w*)\\n?([\\s\\S]*?)' + codeFence, 'g');
     const formatted = text.replace(codeBlockRe, (_, lang, code) => {
       return '<pre><code>' + code.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</code></pre>';
     });

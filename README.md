@@ -53,10 +53,10 @@ local-ai-dev-copilot/
 ## Prerequisites
 
 1. **Node.js 18+**
-2. **Foundry Local** installed and running on `http://localhost:5272`
+2. **Foundry Local** installed and running (default is often `http://localhost:5272`, but local port may vary)
    * Download: <https://github.com/microsoft/Foundry>
    * Start: `foundry service start`
-   * Pull a model: `foundry model run phi-3.5-mini-instruct-generic-gpu`
+   * Pull a model (example): `foundry model run Phi-3.5-mini-instruct-generic-gpu:1`
 
 ---
 
@@ -129,20 +129,32 @@ extension lifecycle (`activate` / `deactivate`). Commands registered:
 
 ## Configuration
 
-Edit `config/default.json` to customise model IDs, Foundry Local URL, token limits, and the web server port.
+Edit `config/default.json` to customise model IDs, preferred Foundry Local URL, token limits, and the web server port.
+
+The app now probes multiple local Foundry endpoints automatically. If your Foundry endpoint is custom, set one of:
+
+* `FOUNDRY_BASE_URL`
+* `FOUNDRY_LOCAL_BASE_URL`
 
 ```json
 {
   "foundryLocal": {
-    "baseUrl": "http://localhost:5272"
+    "baseUrl": "http://localhost:5272",
+    "fallbackBaseUrls": ["http://127.0.0.1:5272", "http://127.0.0.1:59501"]
   },
   "models": {
-    "reasoning": { "id": "phi-3.5-mini-instruct-generic-gpu", "temperature": 0.3 },
-    "coding":    { "id": "phi-3.5-mini-instruct-generic-gpu", "temperature": 0.1 },
-    "fileAnalysis": { "id": "phi-3.5-mini-instruct-generic-gpu", "temperature": 0.2 }
+    "reasoning": { "id": "Phi-3.5-mini-instruct-generic-gpu:1", "temperature": 0.3 },
+    "coding":    { "id": "Phi-3.5-mini-instruct-generic-gpu:1", "temperature": 0.1 },
+    "fileAnalysis": { "id": "Phi-3.5-mini-instruct-generic-gpu:1", "temperature": 0.2 }
   },
   "web": { "port": 3000, "host": "127.0.0.1" }
 }
+```
+
+PowerShell note: use semicolons instead of `&&` on older Windows PowerShell:
+
+```powershell
+npm run lint; npm test; npm start; npm run web
 ```
 
 ---
