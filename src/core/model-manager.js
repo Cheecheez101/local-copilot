@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { converseBedrock } = require('../utils/bedrock-client');
 
 let fetchFn;
 try {
@@ -47,6 +48,14 @@ class ModelManager {
           coding: { id: 'Phi-3.5-mini-instruct-generic-gpu:1', maxTokens: 4096, temperature: 0.1 },
           fileAnalysis: { id: 'Phi-3.5-mini-instruct-generic-gpu:1', maxTokens: 4096, temperature: 0.2 },
         },
+        bedrock: {
+          enabled: false,
+          region: 'us-east-1',
+          modelId: '',
+          temperature: 0.2,
+          maxTokens: 4096,
+        },
+        cloudMode: 'local-first',
       };
     }
   }
@@ -57,6 +66,73 @@ class ModelManager {
    */
   get baseUrl() {
     return this.config.foundryLocal.baseUrl;
+  }
+
+  /**
+   * Get effective cloud mode.
+   * Supported values: 'local-first' | 'always' | 'never' | 'opt-in'
+   * @returns {string}
+   */
+  get cloudMode() {
+    return String(process.env.CLOUD_MODE || this.config.cloudMode || 'local-first').trim().toLowerCase();
+  }
+
+  /**
+   * Resolve Bedrock model ID from env or config.
+   * @param {string} role
+   * @returns {string|undefined}
+   */
+  _resolveBedrockModelId(role) {
+    const modelFromEnv = process.env.BEDROCK_MODEL_ID;
+    if (modelFromEnv) return modelFromEnv;
+
+    const bedrock = this.config?.bedrock || {};
+    if (bedrock.modelId) return bedrock.modelId;
+
+    const roleMapping = bedrock.modelIds || {};
+    return role ? roleMapping[role] : undefined;
+  }
+
+  /**
+   * Determine if Bedrock has enough config to be used.
+   * @param {string} role
+   * @returns {boolean}
+   */
+  isBedrockConfigured(role) {
+    const bedrock = this.config?.bedrock || {};
+    if (!bedrock.enabled) return false;
+
+    const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || bedrock.region;
+    const modelId = this._resolveBedrockModelId(role);
+    return Boolean(region && modelId);
+  }
+
+  /**
+   * Decide whether a request should target Bedrock.
+   * @param {string} role
+   * @param {object} [overrides]
+   * @returns {boolean}
+   */
+  _shouldUseBedrock(role, overrides = {}) {
+    if (!this.isBedrockConfigured(role)) {
+      return false;
+    }
+
+    if (overrides.provider === 'bedrock' || overrides.useCloud === true) {
+      return true;
+    }
+
+    switch (this.cloudMode) {
+      case 'always':
+        return true;
+      case 'never':
+        return false;
+      case 'opt-in':
+        return false;
+      case 'local-first':
+      default:
+        return false;
+    }
   }
 
   /**
@@ -150,6 +226,10 @@ class ModelManager {
    * @returns {Promise<boolean>}
    */
   async isAvailable() {
+    if (this._shouldUseBedrock('reasoning')) {
+      return true;
+    }
+
     try {
       await this._resolveBaseUrl(true);
       return true;
@@ -163,6 +243,10 @@ class ModelManager {
    * @returns {Promise<string[]>} Array of model IDs.
    */
   async listAvailableModels() {
+    if (this._shouldUseBedrock('reasoning')) {
+      return [this._resolveBedrockModelId('reasoning')];
+    }
+
     const baseUrl = await this._resolveBaseUrl();
     const url = this._buildUrl(baseUrl, this.config.foundryLocal.modelsPath);
     const res = await fetchFn(url);
@@ -196,6 +280,33 @@ class ModelManager {
    * @returns {Promise<string>} The model's reply text.
    */
   async chat(role, messages, overrides = {}) {
+    if (this._shouldUseBedrock(role, overrides)) {
+      return this._chatWithBedrock(role, messages, overrides);
+    }
+
+    if (this.cloudMode === 'never' || this.cloudMode === 'opt-in') {
+      return this._chatWithFoundry(role, messages, overrides);
+    }
+
+    // local-first: prefer Foundry, then fail over to Bedrock when configured.
+    try {
+      return await this._chatWithFoundry(role, messages, overrides);
+    } catch (err) {
+      if (this.isBedrockConfigured(role)) {
+        return this._chatWithBedrock(role, messages, overrides);
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Send a chat request to Foundry Local.
+   * @param {string} role
+   * @param {Array<{ role: string, content: string }>} messages
+   * @param {object} [overrides]
+   * @returns {Promise<string>}
+   */
+  async _chatWithFoundry(role, messages, overrides = {}) {
     const modelCfg = this.getModelConfig(role);
     let baseUrl = await this._resolveBaseUrl();
     let url = this._buildUrl(baseUrl, this.config.foundryLocal.apiPath);
@@ -256,6 +367,38 @@ class ModelManager {
       throw new Error('Unexpected response format from Foundry Local');
     }
     return content;
+  }
+
+  /**
+   * Send a chat request to Amazon Bedrock.
+   * @param {string} role
+   * @param {Array<{ role: string, content: string }>} messages
+   * @param {object} [overrides]
+   * @returns {Promise<string>}
+   */
+  async _chatWithBedrock(role, messages, overrides = {}) {
+    const modelCfg = this.getModelConfig(role);
+    const bedrockCfg = this.config?.bedrock || {};
+    const modelId = overrides.modelId || this._resolveBedrockModelId(role);
+    const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || bedrockCfg.region;
+
+    if (!modelId) {
+      throw new Error('Bedrock is enabled but no model ID is configured. Set BEDROCK_MODEL_ID or bedrock.modelId.');
+    }
+
+    if (!region) {
+      throw new Error('Bedrock is enabled but no AWS region is configured. Set AWS_REGION or bedrock.region.');
+    }
+
+    return converseBedrock({
+      modelId,
+      region,
+      messages,
+      temperature: overrides.temperature !== undefined
+        ? overrides.temperature
+        : (bedrockCfg.temperature !== undefined ? bedrockCfg.temperature : modelCfg.temperature),
+      maxTokens: overrides.maxTokens || bedrockCfg.maxTokens || modelCfg.maxTokens,
+    });
   }
 
   /**

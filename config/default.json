@@ -9,6 +9,14 @@
     "modelsPath": "/v1/models",
     "timeout": 60000
   },
+  "bedrock": {
+    "enabled": false,
+    "region": "us-east-1",
+    "modelId": "",
+    "temperature": 0.2,
+    "maxTokens": 4096
+  },
+  "cloudMode": "local-first",
   "models": {
     "reasoning": {
       "id": "Phi-3.5-mini-instruct-generic-gpu:1",

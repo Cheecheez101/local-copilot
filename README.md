@@ -98,6 +98,47 @@ Available commands inside the REPL:
 
 Or just type naturally – the orchestrator will route to the best agent automatically.
 
+### Run Without Foundry (Amazon Bedrock)
+
+If Foundry Local is not installed, you can use Amazon Bedrock as the model provider.
+
+1. Install the Bedrock SDK dependency:
+
+```bash
+npm install @aws-sdk/client-bedrock-runtime
+```
+
+2. Set AWS credentials and region in your shell:
+
+```bash
+export AWS_ACCESS_KEY_ID="..."
+export AWS_SECRET_ACCESS_KEY="..."
+export AWS_REGION="us-east-1"
+export BEDROCK_MODEL_ID="anthropic.claude-3-5-sonnet-20240620-v1:0"
+```
+
+3. Enable Bedrock in `config/default.json`:
+
+```json
+{
+  "bedrock": {
+    "enabled": true,
+    "region": "us-east-1",
+    "modelId": "anthropic.claude-3-5-sonnet-20240620-v1:0",
+    "temperature": 0.2,
+    "maxTokens": 4096
+  },
+  "cloudMode": "always"
+}
+```
+
+`cloudMode` options:
+
+* `local-first`: Try Foundry first, then fallback to Bedrock if enabled.
+* `always`: Always use Bedrock.
+* `never`: Always use Foundry.
+* `opt-in`: Use Bedrock only when explicitly requested by code-path overrides.
+
 ### Web Interface
 
 ```bash
@@ -135,6 +176,9 @@ The app now probes multiple local Foundry endpoints automatically. If your Found
 
 * `FOUNDRY_BASE_URL`
 * `FOUNDRY_LOCAL_BASE_URL`
+* `CLOUD_MODE` (`local-first`, `always`, `never`, `opt-in`)
+* `BEDROCK_MODEL_ID`
+* `AWS_REGION`
 
 ```json
 {
